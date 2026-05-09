@@ -28,14 +28,14 @@ TurboQuant (WHT-based scalar quantization) originates from [TheTom/llama-cpp-tur
 
 Here's your typical "write in Python" best-case ceiling benchmark with [Qwen 3.6 27B](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) using [Q4_K_M drafter](https://huggingface.co/spiritbuun/Qwen3.6-27B-DFlash-GGUF) on a single RTX 3090 24GB. Like any other speculative prediction, DFlash is strongest on structured, repetitive generation: code, tests, boilerplate, JSON-like formats, and other low-entropy continuations.
 
-| Task | Model | Output | Baseline | Bee DFlash | Peak speedup | Acceptance | Draft coverage |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Linked list | Q4_K_M | ~1.2K tok | 39.2 tok/s | **130.1 tok/s** | **3.32x** | 49.1% | 84.5% |
-| Linked list | Q5_K_S | ~1.2K tok | 36.5 tok/s | **135.8 tok/s** | **3.72x** | 47.8% | 85.8% |
-| Cache library | Q4_K_M | ~3.6K tok | 37.5 tok/s | **91.5 tok/s** | **2.44x** | 40.5% | 78.8% |
-| Cache library | Q5_K_S | ~3.6K tok | 35.9 tok/s | **83.7 tok/s** | **2.33x** | 36.7% | 76.2% |
+| Task | Model | Output | Baseline | Bee DFlash | Peak speedup | Acceptance |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Linked list | Q4_K_M | ~1.2K tok | 39.2 tok/s | **130.1 tok/s** | **3.32x** | 49.1% / 84.5% |
+| Linked list | Q5_K_S | ~1.2K tok | 36.5 tok/s | **135.8 tok/s** | **3.72x** | 47.8% / 85.8% |
+| Cache library | Q4_K_M | ~3.6K tok | 37.5 tok/s | **91.5 tok/s** | **2.44x** | 40.5% / 78.8% |
+| Cache library | Q5_K_S | ~3.6K tok | 35.9 tok/s | **83.7 tok/s** | **2.33x** | 36.7% / 76.2% |
 
-*Acceptance = accepted / proposed draft tokens. Draft coverage = accepted draft tokens / final generated tokens.*
+*Acceptance: accepted to proposed draft tokens / accepted draft tokens to final generated tokens.*
 
 This is not a claim about all workloads. DFlash can go much faster on highly predictable code generation than on normal chat. Open-ended prose is much less predictable, so gains are smaller.
 
