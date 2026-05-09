@@ -24,6 +24,8 @@ For the full feature and public-repo comparison, read [docs/beellama-features.md
 
 TurboQuant (WHT-based scalar quantization) originates from [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant). TCQ (Trellis-Coded Quantization) and basic DFlash implementation originate from [spiritbuun/buun-llama-cpp](https://github.com/spiritbuun/buun-llama-cpp) (paper: [Closing the Gap: Trellis-Coded Quantization for KV Cache at 2-3 Bits](https://huggingface.co/datasets/spiritbuun/turboquant-tcq-kv-cache)).
 
+[![Support my work!](https://anbeeld.com/images/support.jpg)](https://anbeeld.com/support)
+
 ## DFlash Speedup
 
 Here's your typical "write in Python" best-case ceiling benchmark with [Qwen 3.6 27B](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) using [Q4_K_M drafter](https://huggingface.co/spiritbuun/Qwen3.6-27B-DFlash-GGUF) on a single RTX 3090 24GB. Like any other speculative prediction, DFlash is strongest on structured, repetitive generation: code, tests, boilerplate, JSON-like formats, and other low-entropy continuations.
@@ -145,3 +147,5 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for inherited llama.cpp contribution con
 - Intel SYCL/oneAPI - SYCL backend (`ggml/src/ggml-sycl/`) - Apache-2.0 WITH LLVM-exception
 
 See the `licenses/` directory for full license texts.
+
+[![Support my work!](https://anbeeld.com/images/support.jpg)](https://anbeeld.com/support)
