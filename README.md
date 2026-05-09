@@ -12,7 +12,7 @@ Here's a [plug-and-play Qwen 3.6 27B setup](docs/quickstart-qwen36-dflash.md) wi
 
 - **DFlash speculative decoding**: `--spec-type dflash` drives a DFlash draft GGUF alongside the target model. The target captures hidden states into a per-layer 4096-slot ring buffer, the drafter cross-attends to the most recent `--spec-dflash-cross-ctx` hidden-state tokens and proposes drafts for target verification.
 - **TurboQuant / TCQ KV-cache compression**: Five cache types (`turbo2`, `turbo3`, `turbo4`, `turbo2_tcq`, `turbo3_tcq`) spanning from 4x to 7.5x compression, with higher-bit options being practically lossless in many cases. Set independently with `--cache-type-k` and `--cache-type-v`.
-- **Adaptive draft-max control**: The server adjusts the active draft horizon at runtime instead of using a fixed `--spec-draft-n-max`. The default `profit` controller compares speculative throughput against a no-spec baseline; the `fringe` alternative maps acceptance-rate bands to draft depth. Use `--no-spec-dm-adaptive` for a static horizon.
+- **Adaptive draft-max control**: The server adjusts the active draft horizon at runtime instead of using a fixed `--spec-draft-n-max`. The default `profit` controller compares speculative throughput against a no-spec baseline; the `fringe` alternative maps acceptance-rate bands to draft depth.
 - **Full multimodal support**: When `--mmproj` is active, the server keeps flat DFlash available for text generation. The model can be fully offloaded to CPU with no problems to reduce VRAM pressure.
 - **Reasoning-loop protection**: The server detects repeated hidden reasoning output and intervenes. Default mode is `force-close` with `--reasoning-loop-window` and `--reasoning-loop-max-period` tuning available.
 - **Sampled DFlash verification**: `--spec-draft-temp` enables rejection-sampling drafter behavior. Activates when both draft and target temperature exceed zero. Draft log probabilities must be available for rejection sampling to produce correct output.
@@ -26,16 +26,16 @@ TurboQuant (WHT-based scalar quantization) originates from [TheTom/llama-cpp-tur
 
 ## DFlash Speedup
 
-Here's your typical Python best-case ceiling benchmark with [Qwen 3.6 27B](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) using [Q4_K_M drafter](https://huggingface.co/spiritbuun/Qwen3.6-27B-DFlash-GGUF) on a single RTX 3090 24GB. Like any other speculative prediction, DFlash is strongest on structured, repetitive generation: code, tests, boilerplate, JSON-like formats, and other low-entropy continuations.
+Here's your typical "write in Python" best-case ceiling benchmark with [Qwen 3.6 27B](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) using [Q4_K_M drafter](https://huggingface.co/spiritbuun/Qwen3.6-27B-DFlash-GGUF) on a single RTX 3090 24GB. Like any other speculative prediction, DFlash is strongest on structured, repetitive generation: code, tests, boilerplate, JSON-like formats, and other low-entropy continuations.
 
-| Workload | Model | Output | Baseline | Bee DFlash | Peak speedup | Acceptance | Draft coverage |
+| Task | Model | Output | Baseline | Bee DFlash | Peak speedup | Acceptance | Draft coverage |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Short Python linked-list bench | Q4_K_M | ~1.2K tok | 39.2 tok/s | **130.1 tok/s** | **3.32x** | 49.1% | 84.5% |
-| Short Python linked-list bench | Q5_K_S | ~1.2K tok | 36.5 tok/s | **135.8 tok/s** | **3.72x** | 47.8% | 85.8% |
-| Longer Python cache bench | Q4_K_M | ~3.6K tok | 37.5 tok/s | **91.5 tok/s** | **2.44x** | 40.5% | 78.8% |
-| Longer Python cache bench | Q5_K_S | ~3.6K tok | 35.9 tok/s | **83.7 tok/s** | **2.33x** | 36.7% | 76.2% |
+| Linked list | Q4_K_M | ~1.2K tok | 39.2 tok/s | **130.1 tok/s** | **3.32x** | 49.1% | 84.5% |
+| Linked list | Q5_K_S | ~1.2K tok | 36.5 tok/s | **135.8 tok/s** | **3.72x** | 47.8% | 85.8% |
+| Cache library | Q4_K_M | ~3.6K tok | 37.5 tok/s | **91.5 tok/s** | **2.44x** | 40.5% | 78.8% |
+| Cache library | Q5_K_S | ~3.6K tok | 35.9 tok/s | **83.7 tok/s** | **2.33x** | 36.7% | 76.2% |
 
-*Acceptance = accepted draft tokens / proposed draft tokens. Draft coverage = accepted draft tokens / final generated tokens.*
+*Acceptance = accepted / proposed draft tokens. Draft coverage = accepted draft tokens / final generated tokens.*
 
 This is not a claim about all workloads. DFlash can go much faster on highly predictable code generation than on normal chat. Open-ended prose is much less predictable, so gains are smaller.
 
@@ -43,7 +43,7 @@ On the bright side, adaptive draft-max will track how much DFlash is helping on 
 
 ## TurboQuant / TCQ cache
 
-| Type | bpv | Compression | Quality vs f16/q8_0 | Practical verdict |
+| Type | bpv | Diff | Quality vs f16/q8_0 | Practical verdict |
 | --- | ---: | ---: | --- | --- |
 | turbo4 | 4.125 | 3.88x | Best scalar TurboQuant quality tier. Available tests show minimal measurable degradation vs f16/q8_0. | Best safe scalar compression target, especially for V cache. |
 | turbo3_tcq | 3.25 | 4.92x | Strongest 3-bit quality. The TCQ docs report 10–44% KL reduction over scalar 2–3 bit quantization and lower PPL than FP16 in one Qwen3.5-27B result: 5.802 vs 5.805. | Best high-compression quality-aware option. |
@@ -51,7 +51,7 @@ On the bright side, adaptive draft-max will track how much DFlash is helping on 
 | turbo2_tcq | 2.25 | 7.11x | Best 2-bit option. Per the TCQ docs it significantly improves 2-bit quantization and closes much of the gap with 3-bit scalar methods. | Extreme compression with better quality story than scalar 2-bit. |
 | turbo2 | 2.125 | 7.53x | Extreme scalar compression. Highest quality risk among scalar TurboQuant types. | Emergency context/VRAM mode. Prefer as a last resort V-only. |
 
-TurboQuant is not *truly* lossless at any point, but on the higher end it might very well be *practically* lossless for most tasks. Especially when one's *practicality* is heavily influenced by VRAM constraints and how to get the most juice out of it.
+TurboQuant is not *truly* lossless at any point, but on the higher end it might very well be *practically* lossless for most tasks. Especially when one's *practicality* is heavily influenced by VRAM constraints and how to get the most out of it.
 
 ## Installation
 
@@ -87,16 +87,9 @@ cmake --build build -j
 
 `GGML_CUDA_FA_ALL_QUANTS=ON` is required for TurboQuant and TCQ cache types. Add `-DCMAKE_CUDA_ARCHITECTURES=86` for RTX 3090, or `-DCMAKE_CUDA_ARCHITECTURES=89` for RTX 4090, if cross-compiling or building in CI without a GPU.
 
-Key binaries:
-
-- `build/bin/llama-server`
-- `build/bin/llama-cli`
-- `build/bin/llama-bench`
-- `build/bin/llama-perplexity`
-
 ### Other Backends
 
-BeeLlama inherits llama.cpp backend support, including Metal, HIP, Vulkan, SYCL, BLAS, CANN, MUSA, OpenVINO, OpenCL, and RPC. Use the upstream-style build docs in [docs/build.md](docs/build.md) and backend-specific pages under [docs/backend](docs/backend).
+Bee inherits llama.cpp backend support, including Metal, HIP, Vulkan, SYCL, BLAS, CANN, MUSA, OpenVINO, OpenCL, and RPC. Use the upstream-style build docs in [docs/build.md](docs/build.md) and backend-specific pages under [docs/backend](docs/backend).
 
 ## Common Commands
 
