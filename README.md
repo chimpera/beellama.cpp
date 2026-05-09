@@ -2,7 +2,7 @@
 
 ![BeeLlama.cpp logo](beellama.jpg)
 
-BeeLlama.cpp (or just Bee) is a performance-focused llama.cpp fork for squeezing more speed and context out of local GGUF inference. It keeps the familiar llama.cpp tools, server flow, and model compatibility, then adds DFlash speculative decoding, adaptive draft control, TurboQuant/TCQ KV-cache compression, reasoning-loop protection, full multimodal support, and experimental speculation modes.
+BeeLlama.cpp (or just Bee) is a performance-focused llama.cpp fork for squeezing more speed and context out of local GGUF inference. It keeps the familiar llama.cpp tools and server flow, then adds DFlash speculative decoding, adaptive draft control, TurboQuant/TCQ KV-cache compression, and reasoning-loop protection, with full multimodal support.
 
 > Not quite a pegasus, but close enough.
 
