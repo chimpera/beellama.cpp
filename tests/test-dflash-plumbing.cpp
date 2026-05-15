@@ -55,6 +55,7 @@ int main(int argc, char ** argv) {
     const std::string memory_recurrent = read_file(root + "/src/llama-memory-recurrent.cpp");
     const std::string qwen35 = read_file(root + "/src/models/qwen35.cpp");
     const std::string qwen35moe = read_file(root + "/src/models/qwen35moe.cpp");
+    const std::string gemma4_iswa = read_file(root + "/src/models/gemma4-iswa.cpp");
     const std::string graph_h = read_file(root + "/src/llama-graph.h");
     const std::string model_cpp = read_file(root + "/src/llama-model.cpp");
     const std::string cuda_ring = read_file(root + "/ggml/src/ggml-cuda/cross-ring-interleave.cu");
@@ -171,6 +172,7 @@ int main(int argc, char ** argv) {
     ok &= expect(context_cpp.find("ggml_backend_tensor_get(tensor, staging.data()") != std::string::npos, "GPU hidden D2D fallback must preserve correctness via readback");
     ok &= expect(qwen35.find("cparams.hidden_gpu_n_seqs > 0") != std::string::npos, "Qwen3.5 must graph-copy l_out into GPU hidden buffers");
     ok &= expect(qwen35moe.find("cparams.hidden_gpu_n_seqs > 0") != std::string::npos, "Qwen3.5-MoE must graph-copy l_out into GPU hidden buffers");
+    ok &= expect(gemma4_iswa.find("cparams.hidden_gpu_n_seqs > 0") != std::string::npos, "Gemma4-ISWA must graph-copy l_out into GPU hidden buffers");
     ok &= expect(cuda_ring.find("dflash_cross_ring_gpu_write_d2d") != std::string::npos, "CUDA ring must expose D2D hidden writes");
     ok &= expect(cuda_reg.find("\"dflash_cross_ring_gpu_write_d2d\"") != std::string::npos, "CUDA backend registry must publish D2D ring writes");
     ok &= expect(llama_h.find("llama_dflash_cross_ring_gpu_write_hidden") != std::string::npos, "public DFlash API must expose hidden GPU ring writes");
@@ -261,6 +263,9 @@ int main(int argc, char ** argv) {
             "DFlash verifier-logit toggles must not reset graph reuse on every verify cycle");
     ok &= expect(qwen35.find("cparams.dflash_verify_logits") != std::string::npos, "Qwen3.5 target graph must emit reduced verifier logits only when gated");
     ok &= expect(qwen35moe.find("cparams.dflash_verify_logits") != std::string::npos, "Qwen3.5-MoE target graph must emit reduced verifier logits only when gated");
+    ok &= expect(gemma4_iswa.find("cparams.dflash_verify_logits") != std::string::npos, "Gemma4-ISWA target graph must emit reduced verifier logits only when gated");
+    ok &= expect(gemma4_iswa.find("ggml_topk_ext(ctx0, cur, topk, 0.0f, 0)") != std::string::npos, "Gemma4-ISWA target verifier top-K must emit raw logit candidates");
+    ok &= expect(gemma4_iswa.find("#include <algorithm>") != std::string::npos, "Gemma4-ISWA must include <algorithm> for std::max/std::min in verifier path");
     ok &= expect(qwen35.find("ggml_topk_ext(ctx0, cur, topk, 0.0f, 0)") != std::string::npos, "Qwen3.5 target verifier top-K must emit raw logit candidates");
     ok &= expect(qwen35moe.find("ggml_topk_ext(ctx0, cur, topk, 0.0f, 0)") != std::string::npos, "Qwen3.5-MoE target verifier top-K must emit raw logit candidates");
     ok &= expect(cuda_argmax.find("temp > 0.0f && seed != 0") != std::string::npos, "CUDA argmax/top-K must skip logsumexp for deterministic verifier top-K");
