@@ -4788,21 +4788,45 @@ class DFlashDraftModel(TextModel):
         # newer drafters nest dflash-specific fields under "dflash_config"; fall back to top-level for older ones
         dflash_cfg = self.hparams.get("dflash_config", {})
 
-        block_size = dflash_cfg.get("block_size", self.hparams.get("block_size", 16))
+        def dflash_value(name: str, default: Any) -> Any:
+            if name in dflash_cfg:
+                return dflash_cfg[name]
+            if name in self.hparams:
+                return self.hparams[name]
+            logger.warning("DFlashDraftModel: missing %s; using default %r", name, default)
+            return default
+
+        block_size = dflash_value("block_size", 16)
         self.gguf_writer.add_uint32(f"{arch}.dflash.block_size", block_size)
 
-        mask_token_id = dflash_cfg.get("mask_token_id", self.hparams.get("mask_token_id", 248070))
+        mask_token_id = dflash_value("mask_token_id", 248070)
         self.gguf_writer.add_uint32(f"{arch}.dflash.mask_token_id", mask_token_id)
 
-        target_layer_ids = dflash_cfg.get("target_layer_ids",
-                                          self.hparams.get("target_layer_ids", [1, 16, 31, 46, 61]))
+        target_layer_ids = dflash_value("target_layer_ids", [1, 16, 31, 46, 61])
         self.gguf_writer.add_array(f"{arch}.dflash.target_layer_ids", target_layer_ids)
 
-        n_target_features = dflash_cfg.get(
-            "n_target_features",
-            self.hparams.get("n_target_features",
-                             self.hparams.get("hidden_size", 5120) * len(target_layer_ids)))
+        if "n_target_features" in dflash_cfg:
+            n_target_features = dflash_cfg["n_target_features"]
+        elif "n_target_features" in self.hparams:
+            n_target_features = self.hparams["n_target_features"]
+        else:
+            n_target_features = self.hparams.get("hidden_size", 5120) * len(target_layer_ids)
+            logger.warning(
+                "DFlashDraftModel: missing n_target_features; inferred %d = hidden_size(%d) * n_target_layers(%d)",
+                n_target_features,
+                self.hparams.get("hidden_size", 5120),
+                len(target_layer_ids),
+            )
+
         self.gguf_writer.add_uint32(f"{arch}.dflash.n_target_features", n_target_features)
+
+        logger.info(
+            "DFlashDraftModel metadata: block_size=%s mask_token_id=%s target_layer_ids=%s n_target_features=%s",
+            block_size,
+            mask_token_id,
+            target_layer_ids,
+            n_target_features,
+        )
 
         if self.hparams.get("use_sliding_window") and self.hparams.get("sliding_window"):
             self.gguf_writer.add_sliding_window(self.hparams["sliding_window"])
