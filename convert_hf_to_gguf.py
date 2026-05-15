@@ -4784,11 +4784,12 @@ class DFlashDraftModel(TextModel):
         self.gguf_writer.add_rope_dimension_count(head_dim)
 
         arch = self.gguf_writer.arch
-        block_size = self.hparams.get("block_size", 16)
-        self.gguf_writer.add_uint32(f"{arch}.dflash.block_size", block_size)
 
         # newer drafters nest dflash-specific fields under "dflash_config"; fall back to top-level for older ones
         dflash_cfg = self.hparams.get("dflash_config", {})
+
+        block_size = dflash_cfg.get("block_size", self.hparams.get("block_size", 16))
+        self.gguf_writer.add_uint32(f"{arch}.dflash.block_size", block_size)
 
         mask_token_id = dflash_cfg.get("mask_token_id", self.hparams.get("mask_token_id", 248070))
         self.gguf_writer.add_uint32(f"{arch}.dflash.mask_token_id", mask_token_id)
@@ -4797,8 +4798,10 @@ class DFlashDraftModel(TextModel):
                                           self.hparams.get("target_layer_ids", [1, 16, 31, 46, 61]))
         self.gguf_writer.add_array(f"{arch}.dflash.target_layer_ids", target_layer_ids)
 
-        n_embd = self.hparams.get("hidden_size", 5120)
-        n_target_features = n_embd * len(target_layer_ids)
+        n_target_features = dflash_cfg.get(
+            "n_target_features",
+            self.hparams.get("n_target_features",
+                             self.hparams.get("hidden_size", 5120) * len(target_layer_ids)))
         self.gguf_writer.add_uint32(f"{arch}.dflash.n_target_features", n_target_features)
 
         if self.hparams.get("use_sliding_window") and self.hparams.get("sliding_window"):
