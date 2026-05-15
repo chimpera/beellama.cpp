@@ -19,6 +19,9 @@
 #include <map>
 #include <cinttypes>
 #include <queue>
+#include <set>
+#include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 
 #define SPEC_VOCAB_MAX_SIZE_DIFFERENCE  128
@@ -1475,6 +1478,29 @@ struct common_speculative_state_recycle : public common_speculative_state {
     }
 };
 
+static std::string common_dflash_layer_ids_to_string(const std::vector<int32_t> & ids) {
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0) {
+            ss << ",";
+        }
+        ss << ids[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
+static bool common_dflash_layer_ids_unique(const std::vector<int32_t> & ids) {
+    std::set<int32_t> seen;
+    for (const int32_t id : ids) {
+        if (!seen.insert(id).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // DFlash block-diffusion speculative decoding
 // Uses an external drafter model conditioned on target hidden states via KV injection
 struct common_speculative_state_dflash : public common_speculative_state {
@@ -1612,6 +1638,72 @@ struct common_speculative_state_dflash : public common_speculative_state {
         n_embd            = llama_model_n_embd(model_dft_);
         n_target_features = llama_model_dflash_n_target_features(model_dft_);
 
+        const llama_model * model_tgt = llama_get_model(ctx_tgt);
+        const int target_n_layer = model_tgt ? llama_model_n_layer(model_tgt) : 0;
+        const int target_n_embd  = model_tgt ? llama_model_n_embd(model_tgt)  : 0;
+
+        auto fail_contract = [&](const std::string & why) {
+            throw std::runtime_error(string_format(
+                "dflash: invalid drafter/target contract: %s "
+                "(block_size=%d mask_token=%d n_target_layers=%d draft_n_embd=%d "
+                "target_n_layer=%d target_n_embd=%d n_target_features=%d)",
+                why.c_str(),
+                block_size,
+                (int) mask_token_id,
+                n_target_layers,
+                n_embd,
+                target_n_layer,
+                target_n_embd,
+                n_target_features));
+        };
+
+        if (!model_tgt) {
+            fail_contract("target model is null");
+        }
+        if (block_size <= 1) {
+            fail_contract("block_size must be greater than 1");
+        }
+        if (mask_token_id < 0) {
+            fail_contract("mask_token_id must be non-negative");
+        }
+        if (n_target_layers <= 0) {
+            fail_contract("n_target_layers must be positive");
+        }
+        if (n_embd <= 0 || target_n_embd <= 0) {
+            fail_contract("embedding sizes must be positive");
+        }
+        if (n_embd != target_n_embd) {
+            fail_contract("drafter n_embd must match target hidden size");
+        }
+        if (n_target_features != n_embd * n_target_layers) {
+            fail_contract("n_target_features must equal n_embd * n_target_layers");
+        }
+
+        std::vector<int32_t> capture_layers(n_target_layers);
+        const int n_read = llama_model_dflash_target_layer_ids(model_dft_, capture_layers.data(), n_target_layers);
+        if (n_read != n_target_layers) {
+            fail_contract(string_format("target_layer_ids read count mismatch: read %d expected %d", n_read, n_target_layers));
+        }
+        if (!common_dflash_layer_ids_unique(capture_layers)) {
+            fail_contract("target_layer_ids contain duplicates");
+        }
+        for (const int32_t il : capture_layers) {
+            if (il < 0 || il >= target_n_layer) {
+                fail_contract(string_format("target_layer_id %d is outside target layer range [0,%d)", il, target_n_layer));
+            }
+        }
+
+        LOG_INF("dflash: contract ok: block_size=%d mask_token=%d target_layer_ids=%s "
+                "n_target_layers=%d n_embd=%d n_target_features=%d target_layers=%d cross_ctx=%d\n",
+                block_size,
+                (int) mask_token_id,
+                common_dflash_layer_ids_to_string(capture_layers).c_str(),
+                n_target_layers,
+                n_embd,
+                n_target_features,
+                target_n_layer,
+                cross_ctx);
+
         ring_buf.resize(n_target_layers);
         for (int i = 0; i < n_target_layers; ++i) {
             ring_buf[i].resize((size_t)RING_SIZE * n_embd, 0.0f);
@@ -1621,8 +1713,6 @@ struct common_speculative_state_dflash : public common_speculative_state {
         // (done in speculative-simple.cpp before common_speculative_init)
 
         // configure target context to capture hidden states
-        std::vector<int32_t> capture_layers(n_target_layers);
-        llama_model_dflash_target_layer_ids(model_dft_, capture_layers.data(), n_target_layers);
         llama_set_dflash_capture(ctx_tgt, capture_layers.data(), n_target_layers);
 
         batch_dft = llama_batch_init(block_size, 0, 1);
@@ -1632,6 +1722,12 @@ struct common_speculative_state_dflash : public common_speculative_state {
         // active so the CPU ring fallback has hidden states to consume.
         const bool gpu_ring_requested = common_dflash_gpu_ring_allowed(ctx_tgt, ctx_dft);
         llama_set_dflash_gpu_capture(ctx_tgt, gpu_ring_requested);
+
+        LOG_INF("dflash: GPU hidden capture policy: requested=%d target_devices=%d drafter_devices=%d\n",
+                gpu_ring_requested ? 1 : 0,
+                llama_model_n_devices(llama_get_model(ctx_tgt)),
+                llama_model_n_devices(model_dft));
+
         if (gpu_ring_requested) {
             gpu_ring_handle = llama_dflash_cross_ring_gpu_init(ctx_dft, n_target_layers, n_embd, cross_ctx);
         }
@@ -1643,8 +1739,6 @@ struct common_speculative_state_dflash : public common_speculative_state {
             LOG_WRN("dflash: GPU cross ring unavailable; using CPU hidden capture\n");
         }
 
-        LOG_INF("dflash: block_size=%d, mask_token=%d, n_target_layers=%d, n_embd=%d\n",
-                block_size, mask_token_id, n_target_layers, n_embd);
     }
 
     ~common_speculative_state_dflash() override {
