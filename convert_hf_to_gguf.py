@@ -4769,43 +4769,86 @@ class Qwen3Model(Qwen2Model):
 class DFlashDraftModel(TextModel):
     model_arch = gguf.MODEL_ARCH.DFLASH_DRAFT
 
+    def _is_gemma4_dflash(self) -> bool:
+        hints = [
+            str(self.hparams.get("model_type", "")),
+            str(self.hparams.get("_name_or_path", "")),
+            str(self.hparams.get("name_or_path", "")),
+            str(self.dir_model.name),
+        ]
+        archs = self.hparams.get("architectures", [])
+        if isinstance(archs, list):
+            hints.extend(str(x) for x in archs)
+
+        hints_l = [h.lower() for h in hints if h]
+        return any(("gemma" in h and "4" in h) or "gemma-4" in h for h in hints_l)
+
+    def _set_vocab_gemma4_hf_bpe(self):
+        vocab = gguf.LlamaHfVocab(self.dir_model)
+        tokens = []
+        scores = []
+        toktypes = []
+
+        visible_tokens = {
+            b"<|channel>",
+            b"<channel|>",
+            b"<|tool_call>",
+            b"<tool_call|>",
+            b"<|tool_response>",
+            b"<tool_response|>",
+            b'<|"|>',
+        }
+
+        for text, score, toktype in vocab.all_tokens():
+            tokens.append(text)
+            scores.append(score)
+
+            if isinstance(text, str):
+                text_bytes = text.encode("utf-8")
+            elif isinstance(text, memoryview):
+                text_bytes = text.tobytes()
+            else:
+                text_bytes = bytes(text)
+
+            if text_bytes in visible_tokens:
+                toktypes.append(gguf.TokenType.USER_DEFINED)
+                logger.info(
+                    "Token %r is set to USER_DEFINED",
+                    text_bytes.decode("utf-8", errors="replace"),
+                )
+            else:
+                toktypes.append(toktype)
+
+        assert len(tokens) == vocab.vocab_size
+
+        self.gguf_writer.add_tokenizer_model("gemma4")
+        self.gguf_writer.add_token_list(tokens)
+        self.gguf_writer.add_token_scores(scores)
+        self.gguf_writer.add_token_types(toktypes)
+
+        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
+        special_vocab.add_to_gguf(self.gguf_writer)
+        self.gguf_writer.add_add_space_prefix(False)
+        self.gguf_writer.add_add_bos_token(True)
+
     def set_vocab(self):
         try:
             self._set_vocab_sentencepiece()
+            return
         except FileNotFoundError:
-            # Gemma 4 target models use a byte-fallback BPE tokenizer that
-            # LlamaHfVocab handles correctly.  Fall back to GPT-2 BPE only
-            # when the tokenizer is not compatible with LlamaHfVocab.
+            pass
+
+        if self._is_gemma4_dflash():
             try:
-                vocab = gguf.LlamaHfVocab(self.dir_model)
-                tokens = []
-                scores = []
-                toktypes = []
-                visible_tokens = {"<|channel>", "<channel|>", "<|tool_call>", "<tool_call|>", "<|tool_response>", "<tool_response|>", "<|\"|>"}
+                self._set_vocab_gemma4_hf_bpe()
+                return
+            except (FileNotFoundError, TypeError, ValueError, UnicodeDecodeError) as e:
+                logger.warning(
+                    "DFlashDraftModel: Gemma4 HF/BPE vocab path failed: %s; falling back to GPT-2 vocab",
+                    e,
+                )
 
-                for text, score, toktype in vocab.all_tokens():
-                    tokens.append(text)
-                    scores.append(score)
-                    text_str = text.decode()
-                    if text_str in visible_tokens:
-                        toktypes.append(gguf.TokenType.USER_DEFINED)
-                        logger.info(f"Token '{text_str}' is set to USER_DEFINED")
-                    else:
-                        toktypes.append(toktype)
-
-                assert len(tokens) == vocab.vocab_size
-
-                self.gguf_writer.add_tokenizer_model("gemma4")
-                self.gguf_writer.add_token_list(tokens)
-                self.gguf_writer.add_token_scores(scores)
-                self.gguf_writer.add_token_types(toktypes)
-
-                special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
-                special_vocab.add_to_gguf(self.gguf_writer)
-                self.gguf_writer.add_add_space_prefix(False)
-                self.gguf_writer.add_add_bos_token(True)
-            except (FileNotFoundError, TypeError):
-                self._set_vocab_gpt2()
+        self._set_vocab_gpt2()
 
     def set_gguf_parameters(self):
         super().set_gguf_parameters()

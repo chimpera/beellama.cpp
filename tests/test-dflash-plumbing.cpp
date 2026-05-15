@@ -351,5 +351,12 @@ int main(int argc, char ** argv) {
     ok &= expect(server_context.find("const bool had_dflash_padding = !slot.spec_pad_i_batch.empty()") != std::string::npos, "server must remember verifier padding through accept bookkeeping");
     ok &= expect(server_context.find("const bool all_accepted_flat = (n_accepted_draft == (int) n_draft) && !had_dflash_padding") != std::string::npos, "DFlash verifier padding must force rollback even when all real draft tokens were accepted");
 
+    // DFlashDraftModel converter vocab path checks
+    ok &= expect(convert_py.find("_is_gemma4_dflash") != std::string::npos, "DFlash converter must have Gemma4 detection helper");
+    ok &= expect(convert_py.find("_set_vocab_gemma4_hf_bpe") != std::string::npos, "DFlash converter must have Gemma4 HF/BPE vocab helper");
+    ok &= expect(convert_py.find("visible_tokens = {") != std::string::npos, "DFlash Gemma4 vocab helper must define visible tokens set");
+    ok &= expect(convert_py.find("errors=\"replace\"") != std::string::npos, "DFlash Gemma4 vocab helper must decode tokens with errors=replace");
+    ok &= expect(convert_py.find("self._set_vocab_gpt2()") != std::string::npos, "DFlash converter must fall back to GPT-2 vocab for non-Gemma drafters");
+
     return ok ? 0 : 1;
 }
