@@ -1562,6 +1562,29 @@ struct common_speculative_state_dflash : public common_speculative_state {
     int n_draft_last = 0;
     int adaptive_n_draft = -1; // -1 = use default
 
+    // Validate that target hidden capture produced expected shapes.
+    // Returns true if shapes match, false if mismatched (logs warning).
+    bool validate_target_hiddens(const char * where) {
+        const int32_t n_slots = llama_get_n_layer_hiddens(ctx_tgt);
+        if (n_slots != n_target_layers) {
+            LOG_WRN("dflash: %s hidden slot count mismatch: got=%d expected=%d\n",
+                    where, (int) n_slots, n_target_layers);
+            return false;
+        }
+
+        for (int i = 0; i < n_slots; ++i) {
+            const int64_t h_embd = llama_get_layer_hidden_n_embd(ctx_tgt, i);
+            const int64_t h_tok  = llama_get_layer_hidden_n_tokens(ctx_tgt, i);
+            if (h_embd != n_embd || h_tok < 0) {
+                LOG_WRN("dflash: %s hidden[%d] shape mismatch: embd=%lld expected=%d tokens=%lld\n",
+                        where, i, (long long) h_embd, n_embd, (long long) h_tok);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     // build interleaved cross-attention data from ring buffer (GPU or CPU path)
     int build_cross_data(llama_context * ctx) {
         LOG_DBG("DFLASH_DBG build_cross_data: ring_write_pos=%d ring_filled=%d committed_len=%d cross_ctx=%d gpu=%d\n",
@@ -1813,9 +1836,10 @@ struct common_speculative_state_dflash : public common_speculative_state {
     void begin(const llama_tokens & prompt) override {
         GGML_UNUSED(prompt);
         if (prefill_flushed) {
-            // ring was already populated incrementally by flush_prefill() calls
-            // during checkpoint-split prefill — nothing to do
             prefill_flushed = false;
+            return;
+        }
+        if (!validate_target_hiddens("begin")) {
             return;
         }
         capture_target_hiddens();
@@ -1823,6 +1847,10 @@ struct common_speculative_state_dflash : public common_speculative_state {
 
     void flush_prefill() override {
         llama_dflash_set_active_slot(ctx_tgt, seq_id);
+
+        if (!validate_target_hiddens("flush_prefill")) {
+            return;
+        }
 
         int32_t n_slots = llama_get_n_layer_hiddens(ctx_tgt);
         if (n_slots == 0) return;
