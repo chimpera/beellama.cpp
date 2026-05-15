@@ -372,10 +372,10 @@ llama_context::llama_context(
         const bool flash_attn_was_auto = cparams.auto_fa;
         if (turbo_requires_fa) {
             if (!cparams.flash_attn) {
-                LLAMA_LOG_WARN("%s: turbo KV cache requires Flash Attention — enabling automatically\n", __func__);
+                LLAMA_LOG_WARN("%s: turbo KV cache requires Flash Attention -- enabling automatically\n", __func__);
                 cparams.flash_attn = true;
             }
-            cparams.auto_fa = false;  // turbo requires FA — don't let sched_reserve override
+            cparams.auto_fa = false;  // turbo requires FA -- don't let sched_reserve override
         }
 
         sched_reserve();
@@ -386,34 +386,41 @@ llama_context::llama_context(
             }
         }
 
-        // Turbo-forced FA must not have device mismatch. The auto-FA check in
-        // sched_reserve() was skipped because turbo sets auto_fa=false. Run the
-        // check here for the turbo case specifically.
-        if (turbo_requires_fa && cparams.flash_attn && !flash_attn_was_auto) {
-            const uint32_t n_seqs = cparams.n_seq_max;
-            const uint32_t n_tokens_fa = std::min(cparams.n_ctx, cparams.n_ubatch);
-            const size_t max_nodes_fa = this->graph_max_nodes(n_tokens_fa);
-            llama_memory_context_ptr mctx_fa = memory ? memory->init_full() : nullptr;
-            const int n_outputs_fa = n_seqs;
-            auto * gf = graph_reserve(1, n_seqs, n_outputs_fa, mctx_fa.get(), true);
-            if (gf) {
-                const size_t prefix_len = strlen(LLAMA_TENSOR_NAME_FATTN) + 1;
-                for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
-                    ggml_tensor * n = ggml_graph_node(gf, i);
-                    if (n->op != GGML_OP_FLASH_ATTN_EXT) {
-                        continue;
-                    }
-                    ggml_backend_dev_t device_fa = ggml_backend_get_device(ggml_backend_sched_get_tensor_backend(sched.get(), n));
-                    GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FATTN "-", prefix_len) == 0);
-                    const int il = std::stoi(n->name + prefix_len);
-                    ggml_backend_dev_t device_kv = model.dev_layer(il);
-                    if (device_fa != device_kv) {
-                        throw std::runtime_error(
-                            std::string("turbo KV cache requires Flash Attention, but layer ") + std::to_string(il) +
-                            " has KV on " + ggml_backend_dev_name(device_kv) + " and FA on " + ggml_backend_dev_name(device_fa) +
-                            " — device mismatch. Consider reducing --n-gpu-layers or using F16 cache types");
-                    }
+        // FA device mismatch check: turbo-forced FA always requires a hard check because
+        // it bypassed the auto-FA logic. Auto-FA also needs the check (existing behavior).
+        auto fa_device_mismatch_layer = [&](ggml_cgraph * gf) -> int {
+            if (!gf) return -1;
+            const size_t prefix_len = strlen(LLAMA_TENSOR_NAME_FATTN) + 1;
+            for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+                ggml_tensor * n = ggml_graph_node(gf, i);
+                if (n->op != GGML_OP_FLASH_ATTN_EXT) {
+                    continue;
                 }
+                ggml_backend_dev_t device_fa = ggml_backend_get_device(ggml_backend_sched_get_tensor_backend(sched.get(), n));
+                GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FATTN "-", prefix_len) == 0);
+                const int il = std::stoi(n->name + prefix_len);
+                ggml_backend_dev_t device_kv = model.dev_layer(il);
+                if (device_fa != device_kv) {
+                    LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but the Flash Attention tensor "
+                            "is assigned to device %s (usually due to missing support)\n",
+                            __func__, il, ggml_backend_dev_name(device_kv), ggml_backend_dev_name(device_fa));
+                    return il;
+                }
+            }
+            return -1;
+        };
+
+        if (turbo_requires_fa && cparams.flash_attn) {
+            // Turbo forced FA -- device mismatch is a hard error
+            const uint32_t n_seqs = cparams.n_seq_max;
+            const int n_outputs_fa = n_seqs;
+            llama_memory_context_ptr mctx_fa = memory ? memory->init_full() : nullptr;
+            auto * gf = graph_reserve(1, n_seqs, n_outputs_fa, mctx_fa.get(), true);
+            const int mismatch_layer = fa_device_mismatch_layer(gf);
+            if (mismatch_layer >= 0) {
+                throw std::runtime_error(
+                    std::string("turbo KV cache requires Flash Attention, but layer ") + std::to_string(mismatch_layer) +
+                    " has a Flash Attention device mismatch. Consider reducing --n-gpu-layers or using F16 cache types");
             }
         }
     }
