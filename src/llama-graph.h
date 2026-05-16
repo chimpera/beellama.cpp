@@ -691,7 +691,9 @@ struct llm_graph_params {
             cparams.hidden_gpu_n_seqs    == other.cparams.hidden_gpu_n_seqs &&
             cparams.prefill_gpu_n_seqs   == other.cparams.prefill_gpu_n_seqs &&
             cparams.dflash_prefill_capture_active == other.cparams.dflash_prefill_capture_active &&
-            cparams.dflash_prefill_n_tokens   == other.cparams.dflash_prefill_n_tokens &&
+            cparams.dflash_prefill_src_offset     == other.cparams.dflash_prefill_src_offset &&
+            cparams.dflash_prefill_dst_offset     == other.cparams.dflash_prefill_dst_offset &&
+            cparams.dflash_prefill_n_tokens       == other.cparams.dflash_prefill_n_tokens &&
             (cparams.tape_gpu != nullptr) == (other.cparams.tape_gpu != nullptr) &&
             arch  == other.arch  &&
             gtype == other.gtype &&

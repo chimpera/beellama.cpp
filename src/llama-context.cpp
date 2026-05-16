@@ -1491,10 +1491,16 @@ void llama_context::set_dflash_capture_active(bool active) {
         cparams.cb_eval = nullptr;
         cparams.cb_eval_user_data = nullptr;
         cparams.hidden_gpu_n_seqs = 0;
+        cparams.prefill_gpu_n_seqs = 0;
+        cparams.dflash_prefill_capture_active = false;
+        cparams.dflash_prefill_src_offset = 0;
+        cparams.dflash_prefill_dst_offset = 0;
+        cparams.dflash_prefill_n_tokens   = 0;
         cparams.tape_gpu_n_seqs = 0;
         cparams.tape_gpu = nullptr;
         for (int s = 0; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
             cparams.hidden_gpu_seqs[s] = nullptr;
+            cparams.prefill_gpu_seqs[s] = nullptr;
             cparams.tape_gpu_seqs[s] = nullptr;
         }
     }
@@ -1519,11 +1525,17 @@ void llama_context::set_dflash_gpu_capture(bool enabled) {
     // buffers are valid.  Do NOT destroy hidden_gpu/tapes vectors — those
     // are persistent GPU allocations that survive logical toggles.
     cparams.hidden_gpu_n_seqs = 0;
+    cparams.prefill_gpu_n_seqs = 0;
+    cparams.dflash_prefill_capture_active = false;
+    cparams.dflash_prefill_src_offset = 0;
+    cparams.dflash_prefill_dst_offset = 0;
+    cparams.dflash_prefill_n_tokens   = 0;
     cparams.tape_gpu_n_seqs = 0;
     cparams.tape_gpu = nullptr;
     for (int s = 0; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
         cparams.tape_gpu_seqs[s] = nullptr;
         cparams.hidden_gpu_seqs[s] = nullptr;
+        cparams.prefill_gpu_seqs[s] = nullptr;
     }
 
     if (!enabled) {
