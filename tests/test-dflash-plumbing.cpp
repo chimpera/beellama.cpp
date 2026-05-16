@@ -436,8 +436,36 @@ int main(int argc, char ** argv) {
     // Prefill suffix tracking
     ok &= expect(speculative.find("prefill_suffix_seen") != std::string::npos,
         "DFlash state must track whether suffix prefill was seen");
-    ok &= expect(speculative.find("prefill_flushed") != std::string::npos,
-        "DFlash state must track whether prefill flush was called");
+    ok &= expect(speculative.find("prefill_flush_called") != std::string::npos,
+        "DFlash state must track whether flush_prefill was called at all");
+    ok &= expect(speculative.find("prefill_flush_requested") != std::string::npos,
+        "DFlash state must track total tokens requested across flush_prefill calls");
+    ok &= expect(speculative.find("prefill_flush_written") != std::string::npos,
+        "DFlash state must track total tokens written across flush_prefill calls");
+    ok &= expect(speculative.find("prefill suffix was scheduled but flush_prefill() was never called") != std::string::npos,
+        "invariant must distinguish scheduled-but-never-called from called-with-zero-writes");
+    ok &= expect(speculative.find("flush was called but wrote 0") != std::string::npos,
+        "invariant must distinguish called-with-zero-writes from ring-empty");
+
+    // Source-first flush_prefill: GPU staging path must not gate on CPU hidden count
+    ok &= expect(speculative.find("n_src_layers = use_prefill_gpu") != std::string::npos,
+        "flush_prefill must determine source layer count independently for GPU staging");
+    ok &= expect(speculative.find("n_src_layers = n_target_layers") != std::string::npos,
+        "flush_prefill must use n_target_layers for prefill GPU staging source");
+    ok &= expect(speculative.find("reason=no-layer-slots") != std::string::npos,
+        "flush_prefill must log early-return reason when CPU hidden has no layer slots");
+    ok &= expect(speculative.find("reason=no-captured-tokens") != std::string::npos,
+        "flush_prefill must log early-return reason when no tokens were captured");
+    ok &= expect(speculative.find("reason=empty-clamped-span") != std::string::npos,
+        "flush_prefill must log early-return reason when clamped span is empty");
+    ok &= expect(speculative.find("n_src_layers") != std::string::npos && speculative.find("dflash prefill flush:") != std::string::npos,
+        "flush_prefill must log n_src_layers for diagnostics");
+
+    // Source-first ring_write: GPU staging must use n_target_layers for D2D loop
+    ok &= expect(speculative.find("n_src_layers = use_prefill_gpu") != std::string::npos,
+        "ring_write must determine source layer count independently for GPU staging");
+    ok &= expect(speculative.find("n_src_layers") != std::string::npos,
+        "ring_write must use source-aware layer count in both sizing and write loops");
 
     // Persistent pre-decode flush decisions
     ok &= expect(server_context.find("pending_prefill_flushes") != std::string::npos,
