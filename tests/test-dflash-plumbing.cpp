@@ -717,5 +717,41 @@ int main(int argc, char ** argv) {
     ok &= expect(server_context.find("common_speculative_set_prefill_capture_enabled(pf.spec, false)") != std::string::npos,
         "prefill flush mismatch must disable DFlash capture for the affected slot");
 
+    // CPU ring validity state machine
+    ok &= expect(!common_dflash_cpu_ring_valid_after_write_for_test(true,  false, true,  false),
+        "GPU-only write must invalidate CPU mirror");
+    ok &= expect(common_dflash_cpu_ring_valid_after_write_for_test(false, true,  true,  true),
+        "Forced CPU-ring write with all layers copied must restore validity");
+    ok &= expect(common_dflash_cpu_ring_valid_after_write_for_test(false, false, false, true),
+        "CPU fallback without GPU ring must restore validity when complete");
+    ok &= expect(!common_dflash_cpu_ring_valid_after_write_for_test(true,  true,  true,  false),
+        "CPU-tracked path with incomplete layer copy must remain invalid");
+
+    // ring_state_save must guard against stale CPU ring
+    ok &= expect(speculative.find("ring_state_save") != std::string::npos
+                  && speculative.find("if (!cpu_ring_valid)") != std::string::npos,
+        "ring_state_save must guard against stale CPU ring data");
+
+    // build_cross_data must refuse stale CPU ring
+    ok &= expect(speculative.find("CPU cross ring is stale") != std::string::npos,
+        "build_cross_data must refuse to build from stale CPU ring");
+
+    // draft/draft_tree must guard against empty build_cross_data
+    ok &= expect(speculative.find("cross_len <= 0") != std::string::npos,
+        "draft and draft_tree must bail out when build_cross_data returns <= 0");
+
+    // Duplicate comment cleanup in multi-slot dflash_draft
+    {
+        size_t pos = 0;
+        int count = 0;
+        std::string needle = "collect per-slot cross data";
+        while ((pos = dflash_draft.find(needle, pos)) != std::string::npos) {
+            ++count;
+            pos += needle.size();
+        }
+        ok &= expect(count == 1,
+            "multi-slot dflash_draft must have only one collect-per-slot-cross-data comment");
+    }
+
     return ok ? 0 : 1;
 }
