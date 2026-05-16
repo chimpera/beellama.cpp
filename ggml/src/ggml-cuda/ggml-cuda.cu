@@ -5578,7 +5578,6 @@ extern "C" bool   dflash_cuda_prepare_ptr(const void *);
 extern "C" bool   dflash_cuda_copy_d2d_no_check(void *, const void *, size_t);
 extern "C" bool   dflash_cuda_synchronize_ptr(const void *);
 extern "C" bool dflash_replay_gdn_state_no_check(void *, const void *, const void *, const void *, const void *, int, int, int, int);
-extern "C" bool dflash_replay_gdn_state_with_stream(void *, const void *, const void *, const void *, const void *, int, int, int, int, void *);
 extern "C" void   dflash_cross_ring_gpu_synchronize(void *);
 extern "C" const float * dflash_cross_ring_gpu_interleave(void *, int, int, int);
 extern "C" void   dflash_cross_ring_gpu_set_tensor(void *, const void *, size_t, size_t);
@@ -5639,12 +5638,6 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "dflash_replay_gdn_state_no_check") == 0) {
         return (void *)dflash_replay_gdn_state_no_check;
-    }
-    if (strcmp(name, "dflash_replay_gdn_state_with_stream") == 0) {
-        return (void *)dflash_replay_gdn_state_with_stream;
-    }
-    if (strcmp(name, "ggml_backend_cuda_get_stream") == 0) {
-        return (void *)ggml_backend_cuda_get_stream;
     }
     if (strcmp(name, "dflash_cross_ring_gpu_synchronize") == 0) {
         return (void *)dflash_cross_ring_gpu_synchronize;
@@ -5747,14 +5740,3 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)
-
-void * ggml_backend_cuda_get_stream(ggml_backend_t backend) {
-    if (!backend || !ggml_backend_is_cuda(backend)) {
-        return nullptr;
-    }
-
-    ggml_backend_cuda_context * cuda_ctx =
-        (ggml_backend_cuda_context *) backend->context;
-
-    return (void *) cuda_ctx->stream();
-}

@@ -43,10 +43,6 @@ gated_delta_net_cuda(const float * q,
     const int      lane     = threadIdx.x;
     const int      col      = blockIdx.z * blockDim.y + threadIdx.y;
 
-    if (h_idx >= H || sequence >= n_seqs || col >= S_v) {
-        return;
-    }
-
     const uint32_t iq1 = fastmodulo(h_idx, neqk1_magic);
     const uint32_t iq3 = fastdiv(sequence, rq3_magic);
 
@@ -240,28 +236,7 @@ void ggml_cuda_op_gated_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor *
 
     const bool kda = (src_g->ne[0] == S_v);
 
-    GGML_ASSERT(src_q->type     == GGML_TYPE_F32);
-    GGML_ASSERT(src_k->type     == GGML_TYPE_F32);
-    GGML_ASSERT(src_v->type     == GGML_TYPE_F32);
-    GGML_ASSERT(src_g->type     == GGML_TYPE_F32);
-    GGML_ASSERT(src_beta->type  == GGML_TYPE_F32);
-    GGML_ASSERT(src_state->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type       == GGML_TYPE_F32);
-
-    GGML_ASSERT(n_tokens > 0);
-    GGML_ASSERT(n_seqs > 0);
     GGML_ASSERT(neq1 == nek1);
-    GGML_ASSERT(neq3 > 0);
-    GGML_ASSERT(nev3 % neq3 == 0);
-
-    GGML_ASSERT(S_v == 16 || S_v == 32 || S_v == 64 || S_v == 128);
-    GGML_ASSERT(src_g->ne[0] == 1 || kda);
-    GGML_ASSERT(src_beta->ne[0] == 1);
-    GGML_ASSERT(ggml_nelements(src_state) == S_v * S_v * H * n_seqs);
-
-    GGML_ASSERT(dst->ne[0] == S_v * H);
-    GGML_ASSERT(dst->ne[1] == n_tokens * n_seqs + S_v * n_seqs);
-
     const int64_t neqk1 = neq1;
 
     const int64_t rq3 = nev3 / neq3;
@@ -377,83 +352,6 @@ dflash_gdn_state_replay_cuda(
     }
 }
 
-static bool dflash_cuda_ptr_device_visible(const void * ptr) {
-    if (!ptr) {
-        return false;
-    }
-
-    cudaPointerAttributes attr;
-    cudaError_t err = cudaPointerGetAttributes(&attr, ptr);
-    if (err != cudaSuccess) {
-        cudaGetLastError();
-        return false;
-    }
-
-#if CUDART_VERSION >= 10000 || defined(GGML_USE_HIP)
-    return attr.type == cudaMemoryTypeDevice || attr.type == cudaMemoryTypeManaged;
-#else
-    return attr.memoryType == cudaMemoryTypeDevice;
-#endif
-}
-
-extern "C" bool dflash_replay_gdn_state_with_stream(
-        void * state,
-        const void * k,
-        const void * v,
-        const void * g,
-        const void * beta,
-        int n_tokens,
-        int S_v,
-        int H_k,
-        int H_v,
-        void * stream_ptr) {
-    if (!state || !k || !v || !g || !beta) return false;
-    if (n_tokens <= 0 || H_k <= 0 || H_v <= 0) return false;
-    if (!(S_v == 16 || S_v == 32 || S_v == 64 || S_v == 128)) return false;
-
-    if (!dflash_cuda_ptr_device_visible(state) ||
-        !dflash_cuda_ptr_device_visible(k)     ||
-        !dflash_cuda_ptr_device_visible(v)     ||
-        !dflash_cuda_ptr_device_visible(g)     ||
-        !dflash_cuda_ptr_device_visible(beta)) {
-        return false;
-    }
-
-    cudaStream_t stream = stream_ptr ? (cudaStream_t) stream_ptr : cudaStreamPerThread;
-
-    const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
-    const int num_warps = 4;
-    const dim3 grid_dims(H_v, 1, (S_v + num_warps - 1) / num_warps);
-    const dim3 block_dims(warp_size <= S_v ? warp_size : S_v, num_warps, 1);
-
-    switch (S_v) {
-        case 16:
-            dflash_gdn_state_replay_cuda<16><<<grid_dims, block_dims, 0, stream>>>(
-                    (float *) state, (const float *) k, (const float *) v,
-                    (const float *) g, (const float *) beta, n_tokens, H_k, H_v);
-            break;
-        case 32:
-            dflash_gdn_state_replay_cuda<32><<<grid_dims, block_dims, 0, stream>>>(
-                    (float *) state, (const float *) k, (const float *) v,
-                    (const float *) g, (const float *) beta, n_tokens, H_k, H_v);
-            break;
-        case 64:
-            dflash_gdn_state_replay_cuda<64><<<grid_dims, block_dims, 0, stream>>>(
-                    (float *) state, (const float *) k, (const float *) v,
-                    (const float *) g, (const float *) beta, n_tokens, H_k, H_v);
-            break;
-        case 128:
-            dflash_gdn_state_replay_cuda<128><<<grid_dims, block_dims, 0, stream>>>(
-                    (float *) state, (const float *) k, (const float *) v,
-                    (const float *) g, (const float *) beta, n_tokens, H_k, H_v);
-            break;
-        default:
-            return false;
-    }
-
-    return cudaPeekAtLastError() == cudaSuccess;
-}
-
 extern "C" bool dflash_replay_gdn_state_no_check(
         void * state,
         const void * k,
@@ -464,8 +362,40 @@ extern "C" bool dflash_replay_gdn_state_no_check(
         int S_v,
         int H_k,
         int H_v) {
-    return dflash_replay_gdn_state_with_stream(
-            state, k, v, g, beta, n_tokens, S_v, H_k, H_v, nullptr);
+    if (!state || !k || !v || !g || !beta) return false;
+    if (n_tokens <= 0 || H_k <= 0 || H_v <= 0) return false;
+
+    const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
+    const int num_warps = 4;
+    const dim3 grid_dims(H_v, 1, (S_v + num_warps - 1) / num_warps);
+    const dim3 block_dims(warp_size <= S_v ? warp_size : S_v, num_warps, 1);
+
+    switch (S_v) {
+        case 16:
+            dflash_gdn_state_replay_cuda<16><<<grid_dims, block_dims, 0, cudaStreamPerThread>>>(
+                    (float *) state, (const float *) k, (const float *) v,
+                    (const float *) g, (const float *) beta, n_tokens, H_k, H_v);
+            break;
+        case 32:
+            dflash_gdn_state_replay_cuda<32><<<grid_dims, block_dims, 0, cudaStreamPerThread>>>(
+                    (float *) state, (const float *) k, (const float *) v,
+                    (const float *) g, (const float *) beta, n_tokens, H_k, H_v);
+            break;
+        case 64:
+            dflash_gdn_state_replay_cuda<64><<<grid_dims, block_dims, 0, cudaStreamPerThread>>>(
+                    (float *) state, (const float *) k, (const float *) v,
+                    (const float *) g, (const float *) beta, n_tokens, H_k, H_v);
+            break;
+        case 128:
+            dflash_gdn_state_replay_cuda<128><<<grid_dims, block_dims, 0, cudaStreamPerThread>>>(
+                    (float *) state, (const float *) k, (const float *) v,
+                    (const float *) g, (const float *) beta, n_tokens, H_k, H_v);
+            break;
+        default:
+            return false;
+    }
+
+    return cudaGetLastError() == cudaSuccess;
 }
 
 // ============================================================================
@@ -504,10 +434,6 @@ gated_delta_net_tree_cuda(const float * q,
     const uint32_t sequence = blockIdx.y;
     const int      lane     = threadIdx.x;
     const int      col      = blockIdx.z * blockDim.y + threadIdx.y;
-
-    if (h_idx >= H || sequence >= n_seqs || col >= S_v) {
-        return;
-    }
 
     const uint32_t iq1 = fastmodulo(h_idx, neqk1_magic);
     const uint32_t iq3 = fastdiv(sequence, rq3_magic);

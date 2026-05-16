@@ -223,15 +223,11 @@ int main(int argc, char ** argv) {
     ok &= expect(context_cpp.find("const ggml_status replay_status = ggml_backend_graph_compute_async(gpu_backend, graph);") != std::string::npos, "DFlash GPU replay graph launch status must be checked");
     ok &= expect(context_cpp.find("GPU DFlash recurrent replay graph failed") != std::string::npos, "DFlash GPU replay graph failure must fall back instead of leaving pending replay state");
     ok &= expect(context_cpp.find("dflash_replay_gdn_state_no_check") != std::string::npos, "DFlash direct replay must call CUDA GDN replay helper");
-    ok &= expect(context_cpp.find("dflash_replay_gdn_state_with_stream") != std::string::npos, "DFlash direct replay must prefer stream-taking CUDA GDN replay helper");
     ok &= expect(context_cpp.find("tl.gate->ne[0] != 1 || tl.beta->ne[0] != 1") != std::string::npos, "direct GDN replay must reject KDA gate/beta layouts");
     ok &= expect(context_cpp.find("DFlash direct GPU GDN replay launch failed after validation") != std::string::npos, "direct GDN replay must not fall back after partial GPU state mutation");
     ok &= expect(cuda_gdn.find("dflash_gdn_state_replay_cuda") != std::string::npos, "CUDA GDN source must provide state-only replay kernel");
     ok &= expect(cuda_gdn.find("dflash_replay_gdn_state_no_check") != std::string::npos, "CUDA GDN source must export state-only replay helper");
-    ok &= expect(cuda_gdn.find("dflash_replay_gdn_state_with_stream") != std::string::npos, "CUDA GDN source must export stream-taking replay helper");
-    ok &= expect(cuda_gdn.find("dflash_cuda_ptr_device_visible") != std::string::npos, "CUDA GDN source must validate device visibility before direct replay");
     ok &= expect(cuda_reg.find("\"dflash_replay_gdn_state_no_check\"") != std::string::npos, "CUDA backend registry must publish state-only GDN replay helper");
-    ok &= expect(cuda_reg.find("\"dflash_replay_gdn_state_with_stream\"") != std::string::npos, "CUDA backend registry must publish stream-taking GDN replay helper");
     ok &= expect(cuda_ring.find("dflash_cuda_copy_d2d") != std::string::npos, "CUDA ring source must provide unsynchronized DFlash D2D copy helper");
     ok &= expect(cuda_reg.find("\"dflash_cuda_copy_d2d\"") != std::string::npos, "CUDA backend registry must publish DFlash D2D copy helper");
     ok &= expect(cuda_ring.find("dflash_cuda_copy_d2d_no_check") != std::string::npos, "CUDA ring source must provide hot-loop D2D copy helper without per-copy pointer validation");

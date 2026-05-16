@@ -2110,13 +2110,9 @@ bool llama_context::tape_replay_gdn_direct_gpu(llama_memory_recurrent * mem_recu
     }
     using prepare_ptr_fn_t = bool (*)(const void *);
     using replay_fn_t = bool (*)(void *, const void *, const void *, const void *, const void *, int, int, int, int);
-    using replay_stream_fn_t = bool (*)(void *, const void *, const void *, const void *, const void *, int, int, int, int, void *);
-    using get_stream_fn_t = void * (*)(ggml_backend_t);
     auto fn_prepare = (prepare_ptr_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cuda_prepare_ptr");
-    auto fn_replay_stream = (replay_stream_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_replay_gdn_state_with_stream");
     auto fn_replay = (replay_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_replay_gdn_state_no_check");
-    auto fn_get_stream = (get_stream_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "ggml_backend_cuda_get_stream");
-    if (!fn_prepare || (!fn_replay_stream && !fn_replay)) {
+    if (!fn_prepare || !fn_replay) {
         return false;
     }
 
@@ -2127,12 +2123,6 @@ bool llama_context::tape_replay_gdn_direct_gpu(llama_memory_recurrent * mem_recu
 
     const auto & rec_ids = dflash_capture->recurrent_layer_ids;
     const uint32_t n_embd_s = model.hparams.n_embd_s();
-
-    ggml_backend_t cuda_backend = dflash_capture->backend;
-    void * stream_ptr = nullptr;
-    if (fn_get_stream && cuda_backend) {
-        stream_ptr = fn_get_stream(cuda_backend);
-    }
     struct replay_launch {
         void * state;
         const void * k;
@@ -2207,19 +2197,9 @@ bool llama_context::tape_replay_gdn_direct_gpu(llama_memory_recurrent * mem_recu
     const int64_t t_start_us = dflash_capture->profile ? ggml_time_us() : 0;
     dflash_capture->replay_sync_ptrs.clear();
     for (const auto & launch : launches) {
-        if (!fn_prepare(launch.state)) {
-            GGML_ABORT("DFlash direct GPU GDN replay prepare failed after validation\n");
-        }
-        bool ok = false;
-        if (fn_replay_stream) {
-            ok = fn_replay_stream(launch.state, launch.k, launch.v, launch.gate, launch.beta,
-                    n_accepted, launch.S, launch.H_k, launch.H_v, stream_ptr);
-        }
-        if (!ok && fn_replay) {
-            ok = fn_replay(launch.state, launch.k, launch.v, launch.gate, launch.beta,
-                    n_accepted, launch.S, launch.H_k, launch.H_v);
-        }
-        if (!ok) {
+        if (!fn_prepare(launch.state) ||
+                !fn_replay(launch.state, launch.k, launch.v, launch.gate, launch.beta,
+                    n_accepted, launch.S, launch.H_k, launch.H_v)) {
             GGML_ABORT("DFlash direct GPU GDN replay launch failed after validation\n");
         }
         dflash_capture->replay_sync_ptrs.push_back(launch.state);
@@ -2242,15 +2222,11 @@ bool llama_context::tape_replay_gdn_direct_from_cpu_tape(llama_memory_recurrent 
     }
     using prepare_ptr_fn_t = bool (*)(const void *);
     using replay_fn_t = bool (*)(void *, const void *, const void *, const void *, const void *, int, int, int, int);
-    using replay_stream_fn_t = bool (*)(void *, const void *, const void *, const void *, const void *, int, int, int, int, void *);
     using sync_ptr_fn_t = bool (*)(const void *);
-    using get_stream_fn_t = void * (*)(ggml_backend_t);
     auto fn_prepare = (prepare_ptr_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cuda_prepare_ptr");
-    auto fn_replay_stream = (replay_stream_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_replay_gdn_state_with_stream");
     auto fn_replay = (replay_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_replay_gdn_state_no_check");
     auto fn_sync = (sync_ptr_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cuda_synchronize_ptr");
-    auto fn_get_stream = (get_stream_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "ggml_backend_cuda_get_stream");
-    if (!fn_prepare || (!fn_replay_stream && !fn_replay) || !fn_sync) {
+    if (!fn_prepare || !fn_replay || !fn_sync) {
         return false;
     }
 
@@ -2258,12 +2234,6 @@ bool llama_context::tape_replay_gdn_direct_from_cpu_tape(llama_memory_recurrent 
     auto & tape_layers = dflash_capture->tape_layers;
     if (rec_ids.empty() || tape_layers.empty()) {
         return false;
-    }
-
-    ggml_backend_t cuda_backend = dflash_capture->backend;
-    void * stream_ptr = nullptr;
-    if (fn_get_stream && cuda_backend) {
-        stream_ptr = fn_get_stream(cuda_backend);
     }
 
     const uint32_t n_embd_s = model.hparams.n_embd_s();
@@ -2404,20 +2374,9 @@ bool llama_context::tape_replay_gdn_direct_from_cpu_tape(llama_memory_recurrent 
     }
 
     for (const auto & upload : uploads) {
-        if (!fn_prepare(upload.state)) {
-            cleanup();
-            GGML_ABORT("DFlash direct CPU-tape GDN replay prepare failed after validation\n");
-        }
-        bool ok = false;
-        if (fn_replay_stream && stream_ptr) {
-            ok = fn_replay_stream(upload.state, upload.k->data, upload.v->data, upload.gate->data, upload.beta->data,
-                    n_accepted, upload.S, upload.H_k, upload.H_v, stream_ptr);
-        }
-        if (!ok && fn_replay) {
-            ok = fn_replay(upload.state, upload.k->data, upload.v->data, upload.gate->data, upload.beta->data,
-                    n_accepted, upload.S, upload.H_k, upload.H_v);
-        }
-        if (!ok) {
+        if (!fn_prepare(upload.state) ||
+                !fn_replay(upload.state, upload.k->data, upload.v->data, upload.gate->data, upload.beta->data,
+                    n_accepted, upload.S, upload.H_k, upload.H_v)) {
             cleanup();
             GGML_ABORT("DFlash direct CPU-tape GDN replay launch failed after validation\n");
         }
