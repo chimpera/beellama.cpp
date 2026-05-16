@@ -1134,10 +1134,9 @@ static bool dflash_batch_view_is_reduced_verify(
         if (slot.state != SLOT_STATE_GENERATING || !slot.can_speculate() || slot.has_draft_tree || slot.spec_draft.empty()) {
             continue;
         }
-        const auto reasoning_state = common_sampler_get_reasoning_budget_state(slot.smpl.get());
-        if (reasoning_state == REASONING_BUDGET_COUNTING || reasoning_state == REASONING_BUDGET_WAITING_UTF8) {
-            return reject("reasoning-active");
-        }
+        // Reasoning-budget state is token/control-flow state, not a full-vocab
+        // logits transform by itself. The sampler capability check below is the
+        // source of truth for whether reduced verifier candidates are safe.
         if (!common_sampler_supports_reduced(slot.smpl.get())) {
             return reject("sampler");
         }
