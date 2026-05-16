@@ -681,6 +681,14 @@ struct llm_graph_params {
             }
         }
 
+        for (size_t i = 0; i < sizeof(cparams.dflash_prefill_src_offsets)/sizeof(cparams.dflash_prefill_src_offsets[0]); ++i) {
+            if (cparams.dflash_prefill_src_offsets[i] != other.cparams.dflash_prefill_src_offsets[i] ||
+                cparams.dflash_prefill_dst_offsets[i] != other.cparams.dflash_prefill_dst_offsets[i] ||
+                cparams.dflash_prefill_n_tokens_seqs[i] != other.cparams.dflash_prefill_n_tokens_seqs[i]) {
+                return false;
+            }
+        }
+
         return
             cparams.embeddings  == other.cparams.embeddings  &&
             cparams.causal_attn == other.cparams.causal_attn &&

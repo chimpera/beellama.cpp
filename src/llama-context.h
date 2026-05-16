@@ -11,6 +11,7 @@
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
 
+#include <algorithm>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -188,7 +189,7 @@ struct dflash_capture_data {
     std::vector<std::unique_ptr<dflash_hidden_gpu>> hidden_gpu;
     std::vector<std::unique_ptr<dflash_hidden_gpu>> prefill_gpu;  // large staging buffer for suffix prefill
     int prefill_gpu_max_tokens = 0;  // allocation capacity of prefill_gpu
-    dflash_prefill_capture_plan prefill_plan;  // active capture window plan
+    std::vector<dflash_prefill_capture_plan> prefill_plans;  // active capture window plans, indexed by seq/slot
     int active_tape_idx = 0;
 
     // Active ubatch for the in-flight process_ubatch() call. The eval callback
@@ -235,6 +236,37 @@ struct dflash_capture_data {
         return (active_tape_idx >= 0 && active_tape_idx < (int) hidden_gpu.size())
                    ? hidden_gpu[active_tape_idx].get()
                    : nullptr;
+    }
+
+    dflash_prefill_capture_plan * prefill_plan_for_seq(llama_seq_id seq_id) {
+        return (seq_id >= 0 && seq_id < (llama_seq_id) prefill_plans.size())
+                   ? &prefill_plans[(size_t) seq_id]
+                   : nullptr;
+    }
+
+    const dflash_prefill_capture_plan * prefill_plan_for_seq(llama_seq_id seq_id) const {
+        return (seq_id >= 0 && seq_id < (llama_seq_id) prefill_plans.size())
+                   ? &prefill_plans[(size_t) seq_id]
+                   : nullptr;
+    }
+
+    bool any_prefill_plan_active() const {
+        for (const auto & plan : prefill_plans) {
+            if (plan.active && plan.n_tokens > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int max_prefill_plan_tokens() const {
+        int max_tokens = 0;
+        for (const auto & plan : prefill_plans) {
+            if (plan.active && plan.n_tokens > 0) {
+                max_tokens = std::max(max_tokens, (int) plan.n_tokens);
+            }
+        }
+        return max_tokens;
     }
 
     std::vector<dflash_layer_hidden_buf> * slot_hiddens(int slot) const {
@@ -647,9 +679,9 @@ public:
     // buffer for the given slot. Returns 0 if slot is invalid or not active.
     int64_t prefill_gpu_n_tokens(int slot) const {
         if (!dflash_capture || slot < 0 || slot >= (int) dflash_capture->prefill_gpu.size()) return 0;
-        const auto & plan = dflash_capture->prefill_plan;
-        if (plan.seq_id == slot && plan.n_written > 0) {
-            return std::min(plan.n_written, plan.n_tokens);
+        const auto * plan = dflash_capture->prefill_plan_for_seq(slot);
+        if (plan && plan->n_written > 0) {
+            return std::min(plan->n_written, plan->n_tokens);
         }
         auto * pf = dflash_capture->prefill_gpu[slot].get();
         return pf ? pf->n_tokens : 0;

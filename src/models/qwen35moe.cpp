@@ -105,11 +105,12 @@ llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_gr
         if (cparams.prefill_gpu_n_seqs > 0 &&
             cparams.dflash_prefill_capture_active &&
             cparams.dflash_prefill_n_tokens > 0) {
-            const int n_copy = cparams.dflash_prefill_n_tokens;
-            const int src_off = cparams.dflash_prefill_src_offset;
-            const int dst_off = cparams.dflash_prefill_dst_offset;
-
             for (int s = 0; s < (int)dflash_capture_n_seqs && s < cparams.prefill_gpu_n_seqs; ++s) {
+                const int n_copy = cparams.dflash_prefill_n_tokens_seqs[s];
+                const int src_off = cparams.dflash_prefill_src_offsets[s];
+                const int dst_off = cparams.dflash_prefill_dst_offsets[s];
+                if (n_copy <= 0) continue;
+
                 auto * pgpu = cparams.prefill_gpu_seqs[s];
                 if (!pgpu) continue;
 
@@ -118,7 +119,8 @@ llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_gr
                     if (pgpu->layer_ids[i] == il) { hi = i; break; }
                 }
                 if (hi < 0) continue;
-                if (dst_off + n_copy > pgpu->max_tokens) continue;
+                if (src_off < 0 || src_off + n_copy > dflash_capture_n_tokens) continue;
+                if (dst_off < 0 || dst_off + n_copy > pgpu->max_tokens) continue;
 
                 ggml_tensor * h_slice = ggml_view_2d(ctx0, cur,
                     cur->ne[0], (int64_t)n_copy,

@@ -100,6 +100,9 @@ struct llama_cparams {
     int32_t dflash_prefill_src_offset = 0;
     int32_t dflash_prefill_dst_offset = 0;
     int32_t dflash_prefill_n_tokens   = 0;
+    int32_t dflash_prefill_src_offsets[LLAMA_DFLASH_MAX_SLOTS] = {};
+    int32_t dflash_prefill_dst_offsets[LLAMA_DFLASH_MAX_SLOTS] = {};
+    int32_t dflash_prefill_n_tokens_seqs[LLAMA_DFLASH_MAX_SLOTS] = {};
 
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;

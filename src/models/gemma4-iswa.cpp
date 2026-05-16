@@ -290,46 +290,47 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
             cparams.dflash_prefill_capture_active &&
             cparams.dflash_prefill_n_tokens > 0 &&
             cur->ne[1] == dflash_capture_n_tokens * dflash_capture_n_seqs) {
-            const int n_copy  = cparams.dflash_prefill_n_tokens;
-            const int src_off = cparams.dflash_prefill_src_offset;
-            const int dst_off = cparams.dflash_prefill_dst_offset;
-
-            if (src_off >= 0 && src_off + n_copy <= dflash_capture_n_tokens) {
-                for (int s = 0; s < (int) dflash_capture_n_seqs && s < cparams.prefill_gpu_n_seqs; ++s) {
-                    auto * pgpu = cparams.prefill_gpu_seqs[s];
-                    if (!pgpu) {
-                        continue;
-                    }
-
-                    int hi = -1;
-                    for (int i = 0; i < (int) pgpu->layer_ids.size(); ++i) {
-                        if (pgpu->layer_ids[i] == il) {
-                            hi = i;
-                            break;
-                        }
-                    }
-                    if (hi < 0) {
-                        continue;
-                    }
-                    if (dst_off < 0 || dst_off + n_copy > pgpu->max_tokens) {
-                        continue;
-                    }
-
-                    ggml_tensor * h_slice = ggml_view_2d(ctx0, cur,
-                        cur->ne[0], (int64_t) n_copy,
-                        cur->nb[1],
-                        (size_t) s * (size_t) dflash_capture_n_tokens * cur->nb[1] +
-                        (size_t) src_off * cur->nb[1]);
-
-                    ggml_tensor * h_cont = ggml_cont(ctx0, h_slice);
-
-                    ggml_tensor * h_dst = ggml_view_2d(ctx0, pgpu->layers[hi],
-                        pgpu->layers[hi]->ne[0], (int64_t) n_copy,
-                        pgpu->layers[hi]->nb[1],
-                        (size_t) dst_off * pgpu->layers[hi]->nb[1]);
-
-                    ggml_build_forward_expand(gf, ggml_cpy(ctx0, h_cont, h_dst));
+            for (int s = 0; s < (int) dflash_capture_n_seqs && s < cparams.prefill_gpu_n_seqs; ++s) {
+                const int n_copy = cparams.dflash_prefill_n_tokens_seqs[s];
+                const int src_off = cparams.dflash_prefill_src_offsets[s];
+                const int dst_off = cparams.dflash_prefill_dst_offsets[s];
+                if (n_copy <= 0 || src_off < 0 || src_off + n_copy > dflash_capture_n_tokens) {
+                    continue;
                 }
+
+                auto * pgpu = cparams.prefill_gpu_seqs[s];
+                if (!pgpu) {
+                    continue;
+                }
+
+                int hi = -1;
+                for (int i = 0; i < (int) pgpu->layer_ids.size(); ++i) {
+                    if (pgpu->layer_ids[i] == il) {
+                        hi = i;
+                        break;
+                    }
+                }
+                if (hi < 0) {
+                    continue;
+                }
+                if (dst_off < 0 || dst_off + n_copy > pgpu->max_tokens) {
+                    continue;
+                }
+
+                ggml_tensor * h_slice = ggml_view_2d(ctx0, cur,
+                    cur->ne[0], (int64_t) n_copy,
+                    cur->nb[1],
+                    (size_t) s * (size_t) dflash_capture_n_tokens * cur->nb[1] +
+                    (size_t) src_off * cur->nb[1]);
+
+                ggml_tensor * h_cont = ggml_cont(ctx0, h_slice);
+
+                ggml_tensor * h_dst = ggml_view_2d(ctx0, pgpu->layers[hi],
+                    pgpu->layers[hi]->ne[0], (int64_t) n_copy,
+                    pgpu->layers[hi]->nb[1],
+                    (size_t) dst_off * pgpu->layers[hi]->nb[1]);
+
+                ggml_build_forward_expand(gf, ggml_cpy(ctx0, h_cont, h_dst));
             }
         }
 
