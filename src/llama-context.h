@@ -15,8 +15,25 @@
 #include <unordered_map>
 #include <vector>
 
+static inline bool llama_dflash_gpu_hidden_supported_arch(llm_arch arch) {
+    switch (arch) {
+        case LLM_ARCH_QWEN35:
+        case LLM_ARCH_QWEN35MOE:
+        case LLM_ARCH_GEMMA4:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static inline bool llama_dflash_gpu_tape_supported_arch(llm_arch arch) {
-    return arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE;
+    switch (arch) {
+        case LLM_ARCH_QWEN35:
+        case LLM_ARCH_QWEN35MOE:
+            return true;
+        default:
+            return false;
+    }
 }
 
 struct llama_memory_recurrent;

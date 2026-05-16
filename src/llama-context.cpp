@@ -1651,12 +1651,24 @@ void llama_context::set_tape_recording(bool enable) {
         cparams.tape_gpu = nullptr;
         cparams.tape_gpu_n_seqs = 0;
         cparams.hidden_gpu_n_seqs = 0;
+        cparams.prefill_gpu_n_seqs = 0;
+        cparams.dflash_prefill_capture_active = false;
+        cparams.dflash_prefill_src_offset = 0;
+        cparams.dflash_prefill_dst_offset = 0;
+        cparams.dflash_prefill_n_tokens   = 0;
         for (int s = 0; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
             cparams.tape_gpu_seqs[s] = nullptr;
             cparams.hidden_gpu_seqs[s] = nullptr;
+            cparams.prefill_gpu_seqs[s] = nullptr;
         }
-        cparams.cb_eval = dflash_eval_callback;
-        cparams.cb_eval_user_data = dflash_capture.get();
+
+        if (dflash_capture->capture_active && !dflash_capture->layer_ids.empty()) {
+            cparams.cb_eval = dflash_eval_callback;
+            cparams.cb_eval_user_data = dflash_capture.get();
+        } else {
+            cparams.cb_eval = nullptr;
+            cparams.cb_eval_user_data = nullptr;
+        }
     }
 }
 
@@ -1814,7 +1826,7 @@ void llama_context::allocate_hidden_gpu(int n_slots, int max_tokens) {
         dflash_capture->hidden_gpu.clear();
         return;
     }
-    if (!llama_dflash_gpu_tape_supported_arch(model.arch)) {
+    if (!llama_dflash_gpu_hidden_supported_arch(model.arch)) {
         dflash_capture->hidden_gpu.clear();
         return;
     }
@@ -1890,7 +1902,7 @@ bool llama_context::allocate_prefill_gpu(int n_slots, int max_tokens) {
     if (model.n_devices() > 1) {
         return false;
     }
-    if (!llama_dflash_gpu_tape_supported_arch(model.arch)) {
+    if (!llama_dflash_gpu_hidden_supported_arch(model.arch)) {
         return false;
     }
 
@@ -2026,7 +2038,10 @@ void llama_context::set_active_dflash_slot(int slot_idx) {
     if (!dflash_capture) {
         return;
     }
-    const int n_slots = std::max((int) layer_hiddens.size(), (int) dflash_capture->tapes.size());
+    int n_slots = (int) layer_hiddens.size();
+    n_slots = std::max(n_slots, (int) dflash_capture->tapes.size());
+    n_slots = std::max(n_slots, (int) dflash_capture->hidden_gpu.size());
+    n_slots = std::max(n_slots, (int) dflash_capture->prefill_gpu.size());
     if (slot_idx < 0 || slot_idx >= n_slots) {
         LLAMA_LOG_WARN("%s: slot %d out of range [0, %d); ignoring\n",
             __func__, slot_idx, n_slots);
@@ -2042,6 +2057,11 @@ void llama_context::set_active_dflash_slot(int slot_idx) {
     cparams.tape_gpu_n_seqs = cparams.tape_gpu ? 1 : 0;
     cparams.hidden_gpu_seqs[0] = dflash_capture->active_hidden_gpu();
     cparams.hidden_gpu_n_seqs = cparams.hidden_gpu_seqs[0] ? 1 : 0;
+    cparams.prefill_gpu_seqs[0] =
+        (slot_idx >= 0 && slot_idx < (int) dflash_capture->prefill_gpu.size())
+            ? dflash_capture->prefill_gpu[slot_idx].get()
+            : nullptr;
+    cparams.prefill_gpu_n_seqs = cparams.prefill_gpu_seqs[0] ? 1 : 0;
     // graph nodes hold references to the previous slot's tape tensors; invalidate
     // so the next decode rebuilds with the new slot's tensors.
     if (gf_res_prev) {

@@ -79,7 +79,9 @@ int main(int argc, char ** argv) {
     ok &= expect(context_h.find("ggml_tensor * qkv") != std::string::npos, "GPU tape layer must own QKV tensor");
     ok &= expect(context_cpp.find("tl.qkv  = ggml_new_tensor_2d") != std::string::npos, "GPU tape allocator must allocate QKV tensor");
     ok &= expect(context_cpp.find("n_accepted <= gpu_tape->n_tokens") != std::string::npos, "GPU tape replay must require populated token count");
-    ok &= expect(context_cpp.find("std::max((int) layer_hiddens.size(), (int) dflash_capture->tapes.size())") != std::string::npos, "active DFlash slot must work without GPU tape");
+    ok &= expect(context_cpp.find("dflash_capture->hidden_gpu.size()") != std::string::npos &&
+                 context_cpp.find("dflash_capture->prefill_gpu.size()") != std::string::npos,
+        "active DFlash slot must work without GPU tape and account for hidden-only/prefill-only contexts");
     ok &= expect(context_cpp.find("get_tensor_data(gpu_layer->qkv") != std::string::npos, "conv rebuild must read QKV from GPU tape through placement-safe tensor access");
     ok &= expect(graph_cpp.find("t_logits_argmax = nullptr;") != std::string::npos, "graph reset must clear reduced logits output pointer");
     ok &= expect(context_cpp.find("logits_argmax_buf.clear();") != std::string::npos, "decode must clear stale reduced logits ids");
