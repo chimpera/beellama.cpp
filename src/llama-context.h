@@ -585,6 +585,14 @@ public:
         return false;
     }
 
+    // DFlash: get the number of tokens captured into the prefill GPU staging
+    // buffer for the given slot. Returns 0 if slot is invalid or not active.
+    int64_t prefill_gpu_n_tokens(int slot) const {
+        if (!dflash_capture || slot < 0 || slot >= (int) dflash_capture->prefill_gpu.size()) return 0;
+        auto * pf = dflash_capture->prefill_gpu[slot].get();
+        return pf ? pf->n_tokens : 0;
+    }
+
 private:
     llm_graph_params graph_params(
                         llm_graph_result * res,

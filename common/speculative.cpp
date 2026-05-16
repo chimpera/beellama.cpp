@@ -1483,6 +1483,13 @@ struct common_speculative_state_recycle : public common_speculative_state {
 
 // DFlash block-diffusion speculative decoding
 // Uses an external drafter model conditioned on target hidden states via KV injection
+
+enum class dflash_capture_source {
+    cpu_hidden,         // eval callback CPU path
+    verify_gpu_hidden,  // small 25-token verify buffers
+    prefill_gpu_hidden, // large ubatch-sized prefill staging buffers
+};
+
 struct common_speculative_state_dflash : public common_speculative_state {
     llama_context * ctx_tgt;
     llama_context * ctx_dft;
@@ -1506,6 +1513,7 @@ struct common_speculative_state_dflash : public common_speculative_state {
     int ring_filled = 0;       // how many valid slots (0..RING_SIZE)
     int committed_len = 0;     // total tokens committed (unbounded counter)
     bool prefill_flushed = false; // true if flush_prefill() was called during this request
+    bool prefill_suffix_seen = false; // true if set_prefill_capture_enabled(true) was called during this request
 
     // Interleaved cross-attention buffer — rebuilt from ring on each draft call
     // Only holds cross_ctx tokens worth of data
@@ -1684,6 +1692,7 @@ struct common_speculative_state_dflash : public common_speculative_state {
             // GPU buffers, and tape metadata were preserved across the
             // temporary disable, so no re-allocation is needed.
             llama_set_dflash_capture_active(ctx_tgt, true);
+            prefill_suffix_seen = true;
             if (profile) {
                 LOG_INF("dflash prefill capture: enabled hidden capture gpu=%d layers=%d\n",
                         gpu_capture_available ? 1 : 0, (int) capture_layers.size());
@@ -1714,7 +1723,12 @@ struct common_speculative_state_dflash : public common_speculative_state {
         if (prefill_flushed) {
             // ring was already populated incrementally by flush_prefill() calls
             // during checkpoint-split prefill — nothing to do
+            if (prefill_suffix_seen && ring_filled <= 0) {
+                LOG_ERR("dflash: prefill suffix was captured but ring is empty (ring_filled=%d committed_len=%d)\n",
+                    ring_filled, committed_len);
+            }
             prefill_flushed = false;
+            prefill_suffix_seen = false;
             return;
         }
         capture_target_hiddens();
@@ -1726,8 +1740,28 @@ struct common_speculative_state_dflash : public common_speculative_state {
         int32_t n_slots = llama_get_n_layer_hiddens(ctx_tgt);
         if (n_slots == 0) return;
 
-        int64_t captured = llama_get_layer_hidden_n_tokens(ctx_tgt, 0);
-        if (captured <= 0) return;
+        // Determine capture source: CPU callback or GPU prefill staging.
+        const bool use_prefill_gpu = llama_dflash_prefill_gpu_active(ctx_tgt);
+
+        int64_t captured = 0;
+        dflash_capture_source source = dflash_capture_source::cpu_hidden;
+
+        if (use_prefill_gpu) {
+            captured = llama_dflash_prefill_gpu_n_tokens(ctx_tgt, seq_id);
+            source = dflash_capture_source::prefill_gpu_hidden;
+        } else {
+            captured = llama_get_layer_hidden_n_tokens(ctx_tgt, 0);
+            source = dflash_capture_source::cpu_hidden;
+        }
+
+        if (captured <= 0) {
+            if (profile) {
+                LOG_INF("dflash prefill flush skipped: source=%s captured=0 n_tokens_arg=%d src_offset=%d\n",
+                    source == dflash_capture_source::prefill_gpu_hidden ? "prefill_gpu" : "cpu",
+                    n_tokens, src_offset);
+            }
+            return;
+        }
 
         // When n_tokens=0, flush the entire capture buffer (legacy path).
         // When n_tokens>0, flush only the span [src_offset, src_offset+n_tokens).
@@ -1741,8 +1775,12 @@ struct common_speculative_state_dflash : public common_speculative_state {
         }
         if (to_write <= 0) return;
 
-        LOG_DBG("DFLASH_DBG flush_prefill: captured=%lld src_offset=%d n_tokens=%d to_write=%d prefill_flushed=%d ring_write_pos=%d ring_filled=%d committed_len=%d\n",
-            (long long)captured, offset, n_tokens, to_write, (int)prefill_flushed, ring_write_pos, ring_filled, committed_len);
+        if (profile) {
+            LOG_INF("dflash prefill flush: source=%s captured=%lld src_offset=%d n_tokens=%d to_write=%d prefill_flushed=%d ring_write_pos=%d ring_filled=%d committed_len=%d gpu=%d\n",
+                source == dflash_capture_source::prefill_gpu_hidden ? "prefill_gpu" : "cpu",
+                (long long)captured, offset, n_tokens, to_write, (int)prefill_flushed, ring_write_pos, ring_filled, committed_len,
+                gpu_ring_handle ? 1 : 0);
+        }
 
         if (!prefill_flushed) {
             // first flush for this request — reset ring
@@ -1752,7 +1790,7 @@ struct common_speculative_state_dflash : public common_speculative_state {
             llama_dflash_kv_cache_reset(ctx_dft);
         }
 
-        const int actual_written = ring_write(to_write, offset, true);
+        const int actual_written = ring_write(to_write, offset, true, source);
         committed_len += actual_written;
         update_drafter_kv_cache(actual_written);
         prefill_flushed = true;
@@ -2225,10 +2263,13 @@ private:
     // write n_tokens into ring buffer from captured hidden states
     // write n_tokens from the capture buffer into the ring, starting at
     // src_offset in the capture buffer. wraps circularly in the ring.
-    int ring_write(int n_tokens, int src_offset = 0, bool force_cpu_ring = false) {
+    // source determines whether data comes from CPU callback, verify GPU, or
+    // prefill GPU staging buffers.
+    int ring_write(int n_tokens, int src_offset = 0, bool force_cpu_ring = false,
+                   dflash_capture_source source = dflash_capture_source::cpu_hidden) {
         if (n_tokens <= 0) return 0;
 
-        const bool use_prefill_gpu = llama_dflash_prefill_gpu_active(ctx_tgt);
+        const bool use_prefill_gpu = (source == dflash_capture_source::prefill_gpu_hidden);
         int32_t n_slots = llama_get_n_layer_hiddens(ctx_tgt);
         int actual_written = n_tokens;
         bool first_layer = true;
@@ -2238,7 +2279,7 @@ private:
             int64_t ntok = llama_get_layer_hidden_n_tokens(ctx_tgt, layer);
 
             // When using prefill GPU staging, the CPU callback was not installed
-            // so data/ntok are 0.  Skip the CPU sizing loop; actual_written is set
+            // so data/ntok are 0. Skip the CPU sizing loop; actual_written is set
             // by the caller's n_tokens argument (the span from should_flush_dflash_prefill).
             if (use_prefill_gpu && !data) {
                 any_layer = true;
@@ -2280,8 +2321,9 @@ private:
                 if ((!data && !gpu_ring_handle) || ntok <= 0) continue;
             }
 
-            // Keep the CPU ring valid during prefill because prompt checkpoints serialize it.
-            // Decode append can skip the CPU copy when GPU ring is active.
+            // CPU ring write: only when we have CPU data and either forcing CPU
+            // ring or no GPU ring is available. In prefill GPU mode, we have no
+            // CPU data, so the CPU ring is not kept in sync with this write.
             if ((force_cpu_ring || !gpu_ring_handle) && data) {
                 const int64_t t_start = profile ? ggml_time_us() : 0;
                 for (int t = 0; t < actual_written; ++t) {
@@ -2295,7 +2337,7 @@ private:
                 }
             }
 
-            // GPU ring upload (capture buffer is contiguous, write fn handles wrap)
+            // GPU ring upload
             if (gpu_ring_handle) {
                 const auto plan = common_dflash_ring_write_plan(cross_ctx, ring_write_pos, actual_written);
                 if (plan.n_tokens > 0) {
@@ -2303,13 +2345,22 @@ private:
                     bool used_d2d = false;
                     if (!data) {
                         // No CPU hidden data — try GPU buffer D2D paths.
-                        // For verify decodes (n_tokens <= 25), try the small verify buffer.
-                        // For prefill suffix (larger batches), try the prefill staging buffer.
-                        used_d2d = llama_dflash_cross_ring_gpu_write_hidden(gpu_ring_handle, ctx_tgt, layer, plan.ring_pos,
-                            src_offset + plan.src_token_offset, plan.n_tokens, embd);
-                        if (!used_d2d) {
+                        if (use_prefill_gpu) {
+                            // Prefill staging: try prefill D2D first, then verify fallback.
                             used_d2d = llama_dflash_prefill_gpu_write_hidden(gpu_ring_handle, ctx_tgt, seq_id, layer, plan.ring_pos,
                                 src_offset + plan.src_token_offset, plan.n_tokens, embd);
+                            if (!used_d2d) {
+                                used_d2d = llama_dflash_cross_ring_gpu_write_hidden(gpu_ring_handle, ctx_tgt, layer, plan.ring_pos,
+                                    src_offset + plan.src_token_offset, plan.n_tokens, embd);
+                            }
+                        } else {
+                            // Verify: try verify hidden D2D first, then prefill fallback.
+                            used_d2d = llama_dflash_cross_ring_gpu_write_hidden(gpu_ring_handle, ctx_tgt, layer, plan.ring_pos,
+                                src_offset + plan.src_token_offset, plan.n_tokens, embd);
+                            if (!used_d2d) {
+                                used_d2d = llama_dflash_prefill_gpu_write_hidden(gpu_ring_handle, ctx_tgt, seq_id, layer, plan.ring_pos,
+                                    src_offset + plan.src_token_offset, plan.n_tokens, embd);
+                            }
                         }
                         gpu_d2d_failed = gpu_d2d_failed || !used_d2d;
                     }

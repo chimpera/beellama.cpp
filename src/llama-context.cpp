@@ -6883,6 +6883,11 @@ bool llama_dflash_prefill_gpu_active(llama_context * ctx) {
     return ctx->prefill_gpu_active();
 }
 
+int64_t llama_dflash_prefill_gpu_n_tokens(llama_context * ctx, int slot) {
+    if (!ctx) return 0;
+    return ctx->prefill_gpu_n_tokens(slot);
+}
+
 void llama_dflash_cross_ring_gpu_synchronize(void * handle) {
     if (!handle) return;
     auto * h = (dflash_cross_ring_handle *)handle;
