@@ -5004,6 +5004,18 @@ int llama_context::decode(const llama_batch & batch_inp) {
                     bool dflash_graph_hidden_ready = false;
                     const int ns = std::min((int) ubatch.n_seqs_unq, (int) LLAMA_DFLASH_MAX_SLOTS);
 
+                    // DFlash hidden capture is indexed by unique logical seq/slot.
+                    // In single-slot server decode, ggml/ubatch may represent tokens
+                    // as multiple internal lanes with n_seq_tokens == 1 while the
+                    // logical DFlash slot still owns the whole ubatch. For capture
+                    // sizing, single unique-seq means "copy all ubatch tokens".
+                    const int dflash_capture_n_seqs =
+                        ubatch.n_seqs_unq > 1 ? (int) ubatch.n_seqs_unq : 1;
+
+                    const int dflash_capture_n_tokens =
+                        ubatch.n_seqs_unq > 1 ? (int) ubatch.n_seq_tokens
+                                               : (int) ubatch.n_tokens;
+
                     // Choose hidden capture buffer set based on ubatch size.
                     // For verify-sized batches (<= MAX_VERIFY_TOKENS), use the small
                     // hidden_gpu buffers. For larger prefill suffix batches, use
@@ -5014,7 +5026,19 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
                     const bool use_prefill_staging =
                         prefill_plan_active &&
-                        ubatch.n_seq_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+                        dflash_capture_n_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+
+                    if (dflash_capture && dflash_capture->profile && prefill_plan_active) {
+                        LLAMA_LOG_INFO(
+                            "%s: dflash capture route: n_tokens=%u n_seq_tokens=%u n_seqs=%u n_seqs_unq=%u capture_n_tokens=%d use_prefill_staging=%d\n",
+                            __func__,
+                            ubatch.n_tokens,
+                            ubatch.n_seq_tokens,
+                            ubatch.n_seqs,
+                            ubatch.n_seqs_unq,
+                            dflash_capture_n_tokens,
+                            use_prefill_staging ? 1 : 0);
+                    }
 
                     if (use_prefill_staging && dflash_gpu_capture_ready && !tree_bufs.active) {
                         // Lazy allocation of prefill staging GPU buffers on first
@@ -5112,7 +5136,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                             !dflash_capture->hidden_gpu.empty() &&
                             dflash_gpu_capture_ready &&
                             !tree_bufs.active &&
-                            ubatch.n_seq_tokens <= LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+                            dflash_capture_n_tokens <= LLAMA_DFLASH_MAX_VERIFY_TOKENS;
 
                         for (int s = 0; s < ns; ++s) {
                             const llama_seq_id seq = ubatch.seq_id_unq[s];
@@ -5120,7 +5144,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                             if (seq >= 0 && seq < (int) dflash_capture->hidden_gpu.size()) {
                                 hp = dflash_capture->hidden_gpu[seq].get();
                                 if (hp) {
-                                    hp->n_tokens = ubatch.n_seq_tokens <= (uint32_t) hp->max_tokens ? (int) ubatch.n_seq_tokens : 0;
+                                    hp->n_tokens = dflash_capture_n_tokens <= hp->max_tokens ? dflash_capture_n_tokens : 0;
                                 }
                             }
                             cparams.hidden_gpu_seqs[s] = hp;
@@ -5141,7 +5165,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                         !dflash_capture->tapes.empty() &&
                         dflash_gpu_capture_ready &&
                         dflash_capture->tape_enabled &&
-                        ubatch.n_seq_tokens <= LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+                        dflash_capture_n_tokens <= LLAMA_DFLASH_MAX_VERIFY_TOKENS;
                     const int tape_ns = dflash_graph_tape_ready ? ns : 0;
 
                     bool seqs_changed = (tape_ns != cparams.tape_gpu_n_seqs);
@@ -5152,7 +5176,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                         if (seq >= 0 && seq < (int) dflash_capture->tapes.size()) {
                             tp = dflash_capture->tapes[seq].get();
                             if (tp) {
-                                tp->n_tokens = ubatch.n_seq_tokens <= (uint32_t) tp->max_tokens ? (int) ubatch.n_seq_tokens : 0;
+                                tp->n_tokens = dflash_capture_n_tokens <= tp->max_tokens ? dflash_capture_n_tokens : 0;
                             }
                         }
                         dflash_tape_gpu * graph_tp = dflash_graph_tape_ready ? tp : nullptr;

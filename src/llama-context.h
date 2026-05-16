@@ -36,6 +36,15 @@ static inline bool llama_dflash_gpu_tape_supported_arch(llm_arch arch) {
     }
 }
 
+// DFlash hidden capture is indexed by unique logical seq/slot.
+// In single-slot server decode, the ubatch may represent tokens as multiple
+// internal lanes with n_seq_tokens == 1 while the logical DFlash slot
+// owns the whole ubatch. For capture sizing, single unique-seq means
+// "copy all ubatch tokens per slot".
+static inline int llama_dflash_capture_tokens_per_seq(uint32_t n_tokens, uint32_t n_seq_tokens, uint32_t n_seqs_unq) {
+    return n_seqs_unq > 1 ? (int) n_seq_tokens : (int) n_tokens;
+}
+
 struct llama_memory_recurrent;
 
 struct llama_model;
