@@ -392,7 +392,7 @@ int main(int argc, char ** argv) {
         "dflash_capture_data must declare prefill GPU staging buffers");
     ok &= expect(context_h.find("allocate_prefill_gpu") != std::string::npos,
         "llama_context must declare lazy prefill GPU allocation");
-    ok &= expect(context_cpp.find("allocate_prefill_gpu(ns, ubatch_size)") != std::string::npos,
+    ok &= expect(context_cpp.find("allocate_prefill_gpu") != std::string::npos,
         "decode loop must lazily allocate prefill GPU staging on first suffix batch");
     ok &= expect(context_h.find("prefill_gpu_active()") != std::string::npos,
         "llama_context must expose prefill GPU active check");
@@ -472,6 +472,100 @@ int main(int argc, char ** argv) {
         "server must persist pre-decode flush decisions through decode");
     ok &= expect(server_context.find("common_speculative_flush_prefill") != std::string::npos,
         "server must call prefill flush after decode regardless of slot state");
+
+    // Prefill capture plan: struct, API, and span
+    ok &= expect(context_h.find("dflash_prefill_capture_plan") != std::string::npos,
+        "dflash_capture_data must declare prefill capture plan struct");
+    ok &= expect(context_h.find("prefill_plan") != std::string::npos,
+        "dflash_capture_data must include prefill_plan field");
+    ok &= expect(context_h.find("dflash_prefill_capture_begin") != std::string::npos,
+        "llama_context must declare prefill capture begin method");
+    ok &= expect(context_h.find("dflash_prefill_capture_end") != std::string::npos,
+        "llama_context must declare prefill capture end method");
+    ok &= expect(context_h.find("dflash_prefill_capture_info") != std::string::npos,
+        "llama_context must declare prefill capture info method");
+    ok &= expect(llama_h.find("llama_dflash_prefill_capture_begin") != std::string::npos,
+        "public API must expose prefill capture begin");
+    ok &= expect(llama_h.find("llama_dflash_prefill_capture_end") != std::string::npos,
+        "public API must expose prefill capture end");
+    ok &= expect(llama_h.find("llama_dflash_prefill_capture_info") != std::string::npos,
+        "public API must expose prefill capture info");
+    ok &= expect(context_cpp.find("dflash_prefill_capture_begin") != std::string::npos,
+        "llama_context must implement prefill capture begin");
+    ok &= expect(context_cpp.find("dflash_prefill_capture_end") != std::string::npos,
+        "llama_context must implement prefill capture end");
+    ok &= expect(context_cpp.find("dflash_prefill_capture_info") != std::string::npos,
+        "llama_context must implement prefill capture info query");
+    ok &= expect(speculative_h.find("capture_begin") != std::string::npos,
+        "common_dflash_prefill_span must include capture_begin");
+    ok &= expect(speculative_h.find("capture_end") != std::string::npos,
+        "common_dflash_prefill_span must include capture_end");
+
+    // Prefill capture plan: n_written tracking and plan reset
+    ok &= expect(context_h.find("n_written") != std::string::npos,
+        "prefill capture plan must track n_written");
+    ok &= expect(context_cpp.find("prefill_plan.n_written = 0") != std::string::npos,
+        "capture begin must reset n_written to 0");
+    ok &= expect(context_cpp.find("prefill_plan.n_written") != std::string::npos,
+        "decode loop must advance n_written after graph copy");
+
+    // CParams intersection offsets for graph builder
+    ok &= expect(cparams_h.find("dflash_prefill_capture_active") != std::string::npos,
+        "cparams must declare prefill capture active flag");
+    ok &= expect(cparams_h.find("dflash_prefill_src_offset") != std::string::npos,
+        "cparams must declare prefill src_offset");
+    ok &= expect(cparams_h.find("dflash_prefill_dst_offset") != std::string::npos,
+        "cparams must declare prefill dst_offset");
+    ok &= expect(cparams_h.find("dflash_prefill_n_tokens") != std::string::npos,
+        "cparams must declare prefill n_tokens");
+    ok &= expect(graph_h.find("dflash_prefill_capture_active") != std::string::npos,
+        "graph reuse must key on prefill capture active flag");
+    ok &= expect(graph_h.find("dflash_prefill_n_tokens") != std::string::npos,
+        "graph reuse must key on prefill n_tokens");
+
+    // Graph builders must use intersection offsets
+    ok &= expect(qwen35.find("dflash_prefill_capture_active") != std::string::npos,
+        "Qwen3.5 graph builder must check prefill capture active");
+    ok &= expect(qwen35.find("dflash_prefill_src_offset") != std::string::npos,
+        "Qwen3.5 graph builder must use prefill src_offset");
+    ok &= expect(qwen35.find("dflash_prefill_dst_offset") != std::string::npos,
+        "Qwen3.5 graph builder must use prefill dst_offset");
+    ok &= expect(qwen35moe.find("dflash_prefill_capture_active") != std::string::npos,
+        "Qwen3.5-MoE graph builder must check prefill capture active");
+    ok &= expect(qwen35moe.find("dflash_prefill_src_offset") != std::string::npos,
+        "Qwen3.5-MoE graph builder must use prefill src_offset");
+    ok &= expect(qwen35moe.find("dflash_prefill_dst_offset") != std::string::npos,
+        "Qwen3.5-MoE graph builder must use prefill dst_offset");
+
+    // Server must call capture_begin and capture_end
+    ok &= expect(server_context.find("llama_dflash_prefill_capture_begin") != std::string::npos,
+        "server must call prefill capture begin before decode");
+    ok &= expect(server_context.find("llama_dflash_prefill_capture_end") != std::string::npos,
+        "server must call prefill capture end after decode");
+
+    // flush_prefill must use capture_info for GPU path
+    ok &= expect(speculative.find("llama_dflash_prefill_capture_info") != std::string::npos,
+        "flush_prefill must query capture plan info for GPU staging");
+    ok &= expect(speculative.find("capture_info") != std::string::npos,
+        "flush_prefill must reference capture_info for n_written");
+
+    // GPU staging flush must be window-relative (offset=0)
+    ok &= expect(server_context.find("common_speculative_flush_prefill(pf.spec, 0,") != std::string::npos,
+        "server must flush with offset=0 for GPU staging");
+
+    // Decode loop must compute intersection offsets
+    ok &= expect(context_cpp.find("inter_begin") != std::string::npos,
+        "decode loop must compute intersection begin");
+    ok &= expect(context_cpp.find("inter_end") != std::string::npos,
+        "decode loop must compute intersection end");
+    ok &= expect(context_cpp.find("dflash_prefill_src_offset") != std::string::npos,
+        "decode loop must set cparams.dflash_prefill_src_offset");
+    ok &= expect(context_cpp.find("dflash_prefill_dst_offset") != std::string::npos,
+        "decode loop must set cparams.dflash_prefill_dst_offset");
+
+    // Prefill GPU allocation must use plan size, not ubatch size
+    ok &= expect(context_cpp.find("prefill_plan.n_tokens") != std::string::npos,
+        "decode loop must allocate prefill GPU based on plan n_tokens");
 
     return ok ? 0 : 1;
 }
