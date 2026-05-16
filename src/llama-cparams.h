@@ -96,6 +96,11 @@ struct llama_cparams {
     dflash_hidden_gpu * prefill_gpu_seqs[LLAMA_DFLASH_MAX_SLOTS] = {};
     int prefill_gpu_n_seqs = 0;
 
+    bool    dflash_prefill_capture_active = false;
+    int32_t dflash_prefill_src_offset = 0;
+    int32_t dflash_prefill_dst_offset = 0;
+    int32_t dflash_prefill_n_tokens   = 0;
+
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
 };

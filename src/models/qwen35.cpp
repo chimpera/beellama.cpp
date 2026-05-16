@@ -92,9 +92,17 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
             }
         }
 
-        // DFlash prefill staging: graph-copy l_out into larger prefill GPU buffers
-        // during suffix prefill when the ubatch exceeds verifier hidden capacity.
-        if (cparams.prefill_gpu_n_seqs > 0) {
+        // DFlash prefill staging: graph-copy the intersection of this ubatch
+        // with the capture window into prefill GPU buffers at the correct offset.
+        // Only copies dflash_prefill_n_tokens tokens starting at src_offset in
+        // the ubatch to dst_offset in the prefill staging buffer.
+        if (cparams.prefill_gpu_n_seqs > 0 &&
+            cparams.dflash_prefill_capture_active &&
+            cparams.dflash_prefill_n_tokens > 0) {
+            const int n_copy = cparams.dflash_prefill_n_tokens;
+            const int src_off = cparams.dflash_prefill_src_offset;
+            const int dst_off = cparams.dflash_prefill_dst_offset;
+
             for (int s = 0; s < (int)n_seqs && s < cparams.prefill_gpu_n_seqs; ++s) {
                 auto * pgpu = cparams.prefill_gpu_seqs[s];
                 if (!pgpu) continue;
@@ -103,15 +111,16 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
                 for (int i = 0; i < (int)pgpu->layer_ids.size(); ++i) {
                     if (pgpu->layer_ids[i] == il) { hi = i; break; }
                 }
-                if (hi < 0 || n_seq_tokens > pgpu->max_tokens) continue;
+                if (hi < 0) continue;
+                if (dst_off + n_copy > pgpu->max_tokens) continue;
 
                 ggml_tensor * h_slice = ggml_view_2d(ctx0, cur,
-                    cur->ne[0], n_seq_tokens,
-                    cur->nb[1], (size_t)s * (size_t)n_seq_tokens * cur->nb[1]);
+                    cur->ne[0], (int64_t)n_copy,
+                    cur->nb[1], (size_t)s * (size_t)n_seq_tokens * cur->nb[1] + (size_t)src_off * cur->nb[1]);
                 ggml_tensor * h_cont = ggml_cont(ctx0, h_slice);
                 ggml_tensor * h_dst = ggml_view_2d(ctx0, pgpu->layers[hi],
-                    pgpu->layers[hi]->ne[0], (int64_t)n_seq_tokens,
-                    pgpu->layers[hi]->nb[1], 0);
+                    pgpu->layers[hi]->ne[0], (int64_t)n_copy,
+                    pgpu->layers[hi]->nb[1], (size_t)dst_off * pgpu->layers[hi]->nb[1]);
                 ggml_build_forward_expand(gf, ggml_cpy(ctx0, h_cont, h_dst));
             }
         }

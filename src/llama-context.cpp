@@ -1562,6 +1562,7 @@ void llama_context::dflash_reset_hidden_capture() {
             pf->n_tokens = 0;
         }
     }
+    dflash_capture->prefill_plan.n_written = 0;
     for (auto & tl : dflash_capture->tape_layers) {
         tl.n_tokens = 0;
     }
@@ -1952,6 +1953,60 @@ bool llama_context::allocate_prefill_gpu(int n_slots, int max_tokens) {
 
     LLAMA_LOG_INFO("%s: allocated prefill GPU staging buffers: %.1f MB total (%d slot%s, %d layers, %d max tokens)\n",
         __func__, total_size / (1024.0 * 1024.0), n_slots, n_slots == 1 ? "" : "s", n_layers, max_tokens);
+    return true;
+}
+
+void llama_context::dflash_prefill_capture_begin(llama_seq_id seq_id, int32_t capture_begin, int32_t capture_end) {
+    if (!dflash_capture) {
+        return;
+    }
+
+    if (capture_end <= capture_begin) {
+        dflash_capture->prefill_plan = {};
+        return;
+    }
+
+    auto & plan = dflash_capture->prefill_plan;
+    plan.active = true;
+    plan.seq_id = seq_id;
+    plan.capture_begin = capture_begin;
+    plan.capture_end = capture_end;
+    plan.n_tokens = capture_end - capture_begin;
+    plan.n_written = 0;
+
+    for (auto & pf : dflash_capture->prefill_gpu) {
+        if (pf) {
+            pf->n_tokens = 0;
+        }
+    }
+
+    LLAMA_LOG_INFO("%s: dflash prefill plan: slot=%d capture_begin=%d capture_end=%d n_tokens=%d\n",
+        __func__, (int) seq_id, (int) capture_begin, (int) capture_end, (int) plan.n_tokens);
+}
+
+void llama_context::dflash_prefill_capture_end() {
+    if (!dflash_capture) {
+        return;
+    }
+    dflash_capture->prefill_plan.active = false;
+}
+
+bool llama_context::dflash_prefill_capture_info(llama_seq_id seq_id, int32_t * n_tokens, int32_t * n_written) const {
+    if (!dflash_capture) {
+        return false;
+    }
+
+    const auto & plan = dflash_capture->prefill_plan;
+    if (!plan.active && plan.n_tokens <= 0) {
+        return false;
+    }
+
+    if (plan.seq_id != seq_id) {
+        return false;
+    }
+
+    if (n_tokens)  *n_tokens  = plan.n_tokens;
+    if (n_written) *n_written = plan.n_written;
     return true;
 }
 
@@ -4920,42 +4975,103 @@ int llama_context::decode(const llama_batch & batch_inp) {
                     // Choose hidden capture buffer set based on ubatch size.
                     // For verify-sized batches (<= MAX_VERIFY_TOKENS), use the small
                     // hidden_gpu buffers. For larger prefill suffix batches, use
-                    // prefill_gpu staging buffers (lazily allocated on first use).
-                    const bool use_prefill_staging = ubatch.n_seq_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+                    // prefill_gpu staging buffers when a capture plan is active.
+                    const bool prefill_plan_active =
+                        dflash_capture->prefill_plan.active &&
+                        dflash_capture->prefill_plan.n_tokens > 0;
+
+                    const bool use_prefill_staging =
+                        prefill_plan_active &&
+                        ubatch.n_seq_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS;
 
                     if (use_prefill_staging && dflash_gpu_capture_ready && !tree_bufs.active) {
                         // Lazy allocation of prefill staging GPU buffers on first
-                        // suffix prefill batch that needs them.
-                        if (dflash_capture->prefill_gpu.empty()) {
-                            const int ubatch_size = cparams.n_ubatch > 0 ? cparams.n_ubatch : 512;
-                            allocate_prefill_gpu(ns, ubatch_size);
+                        // suffix prefill batch that needs them.  Size for the
+                        // capture window, not the ubatch.
+                        const int needed_tokens = dflash_capture->prefill_plan.n_tokens;
+                        if (dflash_capture->prefill_gpu.empty() ||
+                            dflash_capture->prefill_gpu_max_tokens < needed_tokens) {
+                            allocate_prefill_gpu(ns, needed_tokens);
                         }
-                        // Size check: if ubatch exceeds allocated capacity, fall back.
+
                         const bool prefill_fits = !dflash_capture->prefill_gpu.empty() &&
-                            ubatch.n_seq_tokens <= (uint32_t) dflash_capture->prefill_gpu_max_tokens;
+                            needed_tokens <= dflash_capture->prefill_gpu_max_tokens;
 
                         if (prefill_fits) {
+                            // Compute intersection of this internal ubatch with the
+                            // capture window so the graph builder copies only the
+                            // overlapping tokens at the correct destination offset.
+                            int32_t ubatch_pos_min = INT32_MAX;
+                            int32_t ubatch_pos_max = INT32_MIN;
+                            for (uint32_t t = 0; t < ubatch.n_tokens; ++t) {
+                                ubatch_pos_min = std::min(ubatch_pos_min, (int32_t) ubatch.pos[t]);
+                                ubatch_pos_max = std::max(ubatch_pos_max, (int32_t) ubatch.pos[t]);
+                            }
+                            const int32_t ubatch_end = ubatch_pos_max + 1;
+
+                            const int32_t cap_begin = dflash_capture->prefill_plan.capture_begin;
+                            const int32_t cap_end   = dflash_capture->prefill_plan.capture_end;
+
+                            const int32_t inter_begin = std::max(ubatch_pos_min, cap_begin);
+                            const int32_t inter_end   = std::min(ubatch_end, cap_end);
+
+                            const bool has_intersection = inter_begin < inter_end;
+
+                            if (has_intersection) {
+                                cparams.dflash_prefill_capture_active = true;
+                                cparams.dflash_prefill_src_offset = inter_begin - ubatch_pos_min;
+                                cparams.dflash_prefill_dst_offset = inter_begin - cap_begin;
+                                cparams.dflash_prefill_n_tokens   = inter_end - inter_begin;
+                            } else {
+                                cparams.dflash_prefill_capture_active = false;
+                                cparams.dflash_prefill_src_offset = 0;
+                                cparams.dflash_prefill_dst_offset = 0;
+                                cparams.dflash_prefill_n_tokens   = 0;
+                            }
+
                             // Route hidden capture to prefill staging buffers.
+                            // Do NOT set hp->n_tokens to ubatch.n_seq_tokens.
+                            // The graph builder will accumulate into the plan window
+                            // and n_written will be updated after graph compute.
                             dflash_graph_hidden_ready = true;
                             for (int s = 0; s < ns; ++s) {
                                 const llama_seq_id seq = ubatch.seq_id_unq[s];
                                 dflash_hidden_gpu * hp = nullptr;
                                 if (seq >= 0 && seq < (int) dflash_capture->prefill_gpu.size()) {
                                     hp = dflash_capture->prefill_gpu[seq].get();
-                                    if (hp) {
-                                        hp->n_tokens = (int) ubatch.n_seq_tokens;
-                                    }
                                 }
                                 cparams.prefill_gpu_seqs[s] = hp;
-                                dflash_graph_hidden_ready = dflash_graph_hidden_ready && hp && hp->n_tokens > 0;
+                                dflash_graph_hidden_ready = dflash_graph_hidden_ready && hp;
                             }
                             for (int s = ns; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
                                 cparams.prefill_gpu_seqs[s] = nullptr;
                             }
-                            if (dflash_graph_hidden_ready) {
+                            if (dflash_graph_hidden_ready && has_intersection) {
+                                cparams.prefill_gpu_n_seqs = ns;
+                            } else if (!has_intersection) {
+                                // No overlap with capture window; skip hidden capture
+                                // but allow decode to continue for the non-suffix portion.
+                                cparams.prefill_gpu_n_seqs = 0;
+                                cparams.dflash_prefill_capture_active = false;
+                                dflash_graph_hidden_ready = false;
+                            } else {
                                 cparams.prefill_gpu_n_seqs = ns;
                             }
+
+                            LLAMA_LOG_INFO("%s: dflash prefill capture ubatch: slot=%d ubatch=[%d,%d) inter=[%d,%d) src_offset=%d dst_offset=%d n_tokens=%d\n",
+                                __func__,
+                                (int) ubatch.seq_id_unq[0],
+                                (int) ubatch_pos_min, (int) ubatch_end,
+                                (int) inter_begin, (int) inter_end,
+                                (int) cparams.dflash_prefill_src_offset,
+                                (int) cparams.dflash_prefill_dst_offset,
+                                (int) cparams.dflash_prefill_n_tokens);
                         }
+                    } else {
+                        cparams.dflash_prefill_capture_active = false;
+                        cparams.dflash_prefill_src_offset = 0;
+                        cparams.dflash_prefill_dst_offset = 0;
+                        cparams.dflash_prefill_n_tokens   = 0;
                     }
 
                     // If not using prefill staging, check verify-sized hidden_gpu.
@@ -5105,6 +5221,31 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
         auto * t_logits = res->get_logits();
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
+
+        // After successful graph compute, update prefill plan accounting for
+        // the intersection tokens that were graph-copied into prefill_gpu.
+        if (dflash_capture && dflash_capture->prefill_plan.active &&
+            cparams.dflash_prefill_capture_active && cparams.dflash_prefill_n_tokens > 0) {
+            auto & plan = dflash_capture->prefill_plan;
+            const int32_t new_written = cparams.dflash_prefill_dst_offset + cparams.dflash_prefill_n_tokens;
+            if (new_written > plan.n_written) {
+                plan.n_written = new_written;
+            }
+
+            const int n_seqs_ub = std::min((int) ubatch.n_seqs_unq, (int) LLAMA_DFLASH_MAX_SLOTS);
+            for (int s = 0; s < n_seqs_ub; ++s) {
+                const llama_seq_id seq = ubatch.seq_id_unq[s];
+                if (seq == plan.seq_id && seq >= 0 && seq < (int) dflash_capture->prefill_gpu.size()) {
+                    auto * pgpu = dflash_capture->prefill_gpu[seq].get();
+                    if (pgpu) {
+                        pgpu->n_tokens = std::max(pgpu->n_tokens, (int) plan.n_written);
+                    }
+                }
+            }
+
+            LLAMA_LOG_INFO("%s: dflash prefill capture complete: slot=%d planned=%d written=%d\n",
+                __func__, (int) plan.seq_id, (int) plan.n_tokens, (int) plan.n_written);
+        }
 
         if (t_embd && res->get_embd_pooled()) {
             t_embd = res->get_embd_pooled();
@@ -6886,6 +7027,21 @@ bool llama_dflash_prefill_gpu_active(llama_context * ctx) {
 int64_t llama_dflash_prefill_gpu_n_tokens(llama_context * ctx, int slot) {
     if (!ctx) return 0;
     return ctx->prefill_gpu_n_tokens(slot);
+}
+
+void llama_dflash_prefill_capture_begin(llama_context * ctx, llama_seq_id seq_id, int32_t capture_begin, int32_t capture_end) {
+    if (!ctx) return;
+    ctx->dflash_prefill_capture_begin(seq_id, capture_begin, capture_end);
+}
+
+void llama_dflash_prefill_capture_end(llama_context * ctx) {
+    if (!ctx) return;
+    ctx->dflash_prefill_capture_end();
+}
+
+bool llama_dflash_prefill_capture_info(llama_context * ctx, llama_seq_id seq_id, int32_t * n_tokens, int32_t * n_written) {
+    if (!ctx) return false;
+    return ctx->dflash_prefill_capture_info(seq_id, n_tokens, n_written);
 }
 
 void llama_dflash_cross_ring_gpu_synchronize(void * handle) {

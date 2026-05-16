@@ -106,6 +106,19 @@ struct llama_tree_mask {
     std::vector<uint8_t> visibility;  // [n² row-major] true = can attend
 };
 
+struct dflash_prefill_capture_plan {
+    bool active = false;
+
+    llama_seq_id seq_id = -1;
+
+    int32_t capture_begin = 0;
+    int32_t capture_end   = 0;
+
+    int32_t n_tokens = 0;
+
+    int32_t n_written = 0;
+};
+
 // DFlash: eval callback data for hidden state capture + tape recording
 struct dflash_capture_data {
     // Logical per-view capture gate. When false, the eval callback is not
@@ -135,6 +148,7 @@ struct dflash_capture_data {
     std::vector<std::unique_ptr<dflash_hidden_gpu>> hidden_gpu;
     std::vector<std::unique_ptr<dflash_hidden_gpu>> prefill_gpu;  // large staging buffer for suffix prefill
     int prefill_gpu_max_tokens = 0;  // allocation capacity of prefill_gpu
+    dflash_prefill_capture_plan prefill_plan;  // active capture window plan
     int active_tape_idx = 0;
 
     // Active ubatch for the in-flight process_ubatch() call. The eval callback
@@ -576,6 +590,10 @@ public:
     void tree_rollback(llama_seq_id seq_id, llama_seq_id seq_backup, int commit_n, const int32_t * parents);
     void set_tree_seq0_count(int n) { tree_bufs.n_seq0_tokens = n; }
 
+    void dflash_prefill_capture_begin(llama_seq_id seq_id, int32_t capture_begin, int32_t capture_end);
+    void dflash_prefill_capture_end();
+    bool dflash_prefill_capture_info(llama_seq_id seq_id, int32_t * n_tokens, int32_t * n_written) const;
+
     // DFlash: check if prefill GPU staging buffers have captured data from the last decode.
     bool prefill_gpu_active() const {
         if (!dflash_capture) return false;
@@ -589,6 +607,10 @@ public:
     // buffer for the given slot. Returns 0 if slot is invalid or not active.
     int64_t prefill_gpu_n_tokens(int slot) const {
         if (!dflash_capture || slot < 0 || slot >= (int) dflash_capture->prefill_gpu.size()) return 0;
+        const auto & plan = dflash_capture->prefill_plan;
+        if (plan.seq_id == slot && plan.n_written > 0) {
+            return std::min(plan.n_written, plan.n_tokens);
+        }
         auto * pf = dflash_capture->prefill_gpu[slot].get();
         return pf ? pf->n_tokens : 0;
     }

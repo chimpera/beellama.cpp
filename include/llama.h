@@ -1213,6 +1213,11 @@ extern "C" {
     // of tokens captured into the prefill staging buffer for the given slot.
     // Returns 0 if prefill GPU is not active or slot is invalid.
     LLAMA_API int64_t llama_dflash_prefill_gpu_n_tokens(struct llama_context * ctx, int slot);
+
+    LLAMA_API void   llama_dflash_prefill_capture_begin(struct llama_context * ctx, llama_seq_id seq_id, int32_t capture_begin, int32_t capture_end);
+    LLAMA_API void   llama_dflash_prefill_capture_end(struct llama_context * ctx);
+    LLAMA_API bool   llama_dflash_prefill_capture_info(struct llama_context * ctx, llama_seq_id seq_id, int32_t * n_tokens, int32_t * n_written);
+
     LLAMA_API void   llama_dflash_cross_ring_gpu_synchronize(void * handle);
     LLAMA_API void   llama_dflash_cross_ring_gpu_set_cross(struct llama_context * ctx, void * handle, llama_seq_id seq_id, int ring_write_pos, int ring_filled, int n_layers, int n_embd, int ctx_window);
     LLAMA_API bool   llama_dflash_kv_cache_init(struct llama_context * ctx, int ctx_size);
