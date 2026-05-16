@@ -487,8 +487,8 @@ int main(int argc, char ** argv) {
         "graph reuse must key on prefill GPU staging topology");
     ok &= expect(context_cpp.find("use_prefill_staging") != std::string::npos,
         "decode loop must choose between prefill staging and verify hidden_gpu");
-    ok &= expect(context_cpp.find("ubatch.n_seq_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS") != std::string::npos,
-        "prefill staging must be selected when ubatch exceeds verify token capacity");
+    ok &= expect(context_cpp.find("dflash_capture_n_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS") != std::string::npos,
+        "prefill staging must be selected when capture_n_tokens exceeds verify token capacity");
 
     // Prefill span math and flush
     ok &= expect(speculative_h.find("common_dflash_prefill_span") != std::string::npos,
@@ -752,6 +752,49 @@ int main(int argc, char ** argv) {
         ok &= expect(count == 1,
             "multi-slot dflash_draft must have only one collect-per-slot-cross-data comment");
     }
+
+    // DFlash capture token count for single unique-seq ubatch
+    ok &= expect(llama_dflash_capture_tokens_per_seq(11, 1, 1) == 11,
+        "single unique-seq ubatch must capture n_tokens, not n_seq_tokens");
+    ok &= expect(llama_dflash_capture_tokens_per_seq(1939, 1, 1) == 1939,
+        "single unique-seq large ubatch must capture n_tokens");
+    ok &= expect(llama_dflash_capture_tokens_per_seq(22, 11, 2) == 11,
+        "multi-seq ubatch must capture n_seq_tokens per slot");
+
+    // Decode must use dflash_capture_n_tokens for staging/verify routing
+    ok &= expect(context_cpp.find("dflash_capture_n_tokens") != std::string::npos,
+        "decode must compute dflash_capture_n_tokens for capture routing");
+    ok &= expect(context_cpp.find("dflash_capture_n_seqs") != std::string::npos,
+        "decode must compute dflash_capture_n_seqs for capture routing");
+
+    // Graph builders must use dflash_capture_n_tokens/n_seqs
+    ok &= expect(gemma4_iswa.find("dflash_capture_n_tokens") != std::string::npos,
+        "Gemma4 graph builder must use dflash_capture_n_tokens");
+    ok &= expect(qwen35.find("dflash_capture_n_tokens") != std::string::npos,
+        "Qwen35 graph builder must use dflash_capture_n_tokens");
+    ok &= expect(qwen35moe.find("dflash_capture_n_tokens") != std::string::npos,
+        "Qwen35-MoE graph builder must use dflash_capture_n_tokens");
+
+    // capture_layers must not be shadowed by local variable
+    ok &= expect(speculative.find("capture_layers.assign") != std::string::npos,
+        "constructor must assign member capture_layers, not declare a local that shadows it");
+
+    // Large prefill cannot fallback to 1-token verify capture
+    ok &= expect(common_dflash_should_refuse_large_prefill_fallback_for_test(764, false, true),
+        "large CPU-only prefill fallback with GPU ring must be refused");
+    ok &= expect(!common_dflash_should_refuse_large_prefill_fallback_for_test(4, false, true),
+        "small verify-sized CPU fallback must be allowed");
+    ok &= expect(!common_dflash_should_refuse_large_prefill_fallback_for_test(764, true, true),
+        "prefill GPU capture must not be refused even for large spans");
+
+    // Reduced verifier must not be disabled by reasoning state alone
+    ok &= expect(server_context.find("reasoning-active") == std::string::npos
+                  || server_context.find("reasoning-active") > server_context.rfind("sampler"),
+        "reduced verifier must not reject on reasoning-active; only sampler capability matters");
+
+    // Debug-gated ring mismatch logs
+    ok &= expect(speculative.find("common_dflash_debug_logs_enabled") != std::string::npos,
+        "ring_write MISMATCH log must be gated by GGML_DFLASH_DEBUG env var");
 
     return ok ? 0 : 1;
 }
