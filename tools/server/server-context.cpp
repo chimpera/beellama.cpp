@@ -4331,6 +4331,7 @@ private:
             std::vector<pending_dflash_prefill_flush> pending_prefill_flushes;
 
             if (params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH) {
+                bool dflash_view_has_generating = false;
                 for (auto & slot : slots) {
                     if (!slot.can_speculate() || !slot.spec) {
                         continue;
@@ -4352,16 +4353,38 @@ private:
 
                     if (slot.state == SLOT_STATE_GENERATING) {
                         dflash_capture_needed_for_view = true;
-                        break;
+                        dflash_view_has_generating = true;
+                    }
+                }
+
+                for (auto & slot : slots) {
+                    if (!slot.can_speculate() || !slot.spec) {
+                        continue;
                     }
 
-                    if ((slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT)) {
+                    bool slot_in_view = false;
+                    for (int32_t j = 0; j < batch_view.n_tokens && !slot_in_view; ++j) {
+                        for (int32_t k = 0; k < batch_view.n_seq_id[j]; ++k) {
+                            if (batch_view.seq_id[j][k] == slot.id) {
+                                slot_in_view = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!slot_in_view || slot.state == SLOT_STATE_GENERATING) {
+                        continue;
+                    }
+
+                    if (!dflash_view_has_generating &&
+                            (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT)) {
                         auto span = should_flush_dflash_prefill(slot, batch_view, true);
                         if (span.should_flush) {
                             dflash_capture_needed_for_view = true;
                             // Store the flush decision so we can execute it after
                             // decode regardless of slot state transitions.
                             pending_prefill_flushes.push_back({ slot.spec.get(), slot.id, span });
+                            common_speculative_note_prefill_suffix_scheduled(slot.spec.get());
 
                             // Tell llama_context that the upcoming decode must accumulate
                             // exactly this useful suffix window into prefill GPU staging.
@@ -4474,15 +4497,10 @@ private:
             // PROCESSING_PROMPT to GENERATING, but the capture data was produced
             // during this decode and must be flushed now.
             for (auto & pf : pending_prefill_flushes) {
-                // For GPU prefill staging, the staging buffer is window-relative
-                // (accumulated from offset 0), so flush with src_offset=0.
-                int src_offset_for_flush = 0;
-                (void)src_offset_for_flush;
-
-                const int written = common_speculative_flush_prefill(pf.spec, 0, pf.span.n_tokens);
+                const int written = common_speculative_flush_prefill(pf.spec, pf.span.src_offset, pf.span.n_tokens);
                 if (written != pf.span.n_tokens) {
-                    SRV_ERR("dflash prefill flush mismatch: slot=%d requested=%d written=%d src_offset=0; disabling DFlash drafting until fresh hiddens are available\n",
-                            pf.slot_id, pf.span.n_tokens, written);
+                    SRV_ERR("dflash prefill flush mismatch: slot=%d requested=%d written=%d src_offset=%d; disabling DFlash drafting until fresh hiddens are available\n",
+                            pf.slot_id, pf.span.n_tokens, written, pf.span.src_offset);
 
                     common_speculative_set_prefill_capture_enabled(pf.spec, false);
                 }

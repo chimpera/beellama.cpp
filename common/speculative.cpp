@@ -324,6 +324,10 @@ struct common_speculative_state {
     // No-op in base class. DFlash overrides to toggle llama_set_dflash_capture.
     virtual void set_prefill_capture_enabled(bool /*enabled*/) {}
 
+    // Mark that a suffix-prefill flush was scheduled for this speculative state.
+    // No-op in base class; DFlash uses this for per-slot invariants.
+    virtual void note_prefill_suffix_scheduled() {}
+
     // save/restore ring buffer state for checkpoint persistence.
     // allows hidden states captured during prefill to survive checkpoint restore.
     virtual size_t ring_state_size() const { return 0; }
@@ -1568,7 +1572,7 @@ struct common_speculative_state_dflash : public common_speculative_state {
     bool prefill_flush_called = false; // true if flush_prefill() was called at all
     int  prefill_flush_requested = 0; // total tokens requested across all flush_prefill() calls
     int  prefill_flush_written = 0;    // total tokens actually written across all flush_prefill() calls
-    bool prefill_suffix_seen = false; // true if set_prefill_capture_enabled(true) was called during this request
+    bool prefill_suffix_seen = false; // true if this request scheduled a suffix prefill flush
 
     // Interleaved cross-attention buffer — rebuilt from ring on each draft call
     // Only holds cross_ctx tokens worth of data
@@ -1882,7 +1886,6 @@ struct common_speculative_state_dflash : public common_speculative_state {
             // GPU buffers, and tape metadata were preserved across the
             // temporary disable, so no re-allocation is needed.
             llama_set_dflash_capture_active(ctx_tgt, true);
-            prefill_suffix_seen = true;
             if (profile) {
                 LOG_INF("dflash prefill capture: enabled hidden capture gpu=%d layers=%d\n",
                         gpu_capture_available ? 1 : 0, (int) capture_layers.size());
@@ -1895,6 +1898,10 @@ struct common_speculative_state_dflash : public common_speculative_state {
                 LOG_INF("dflash prefill capture: disabled hidden capture for non-suffix prompt chunk\n");
             }
         }
+    }
+
+    void note_prefill_suffix_scheduled() override {
+        prefill_suffix_seen = true;
     }
 
     // prepare cross-attention data for batched draft decode.
@@ -3593,6 +3600,15 @@ void common_speculative_set_prefill_capture_enabled(common_speculative * spec, b
     }
     for (auto & impl : spec->impls) {
         impl->set_prefill_capture_enabled(enabled);
+    }
+}
+
+void common_speculative_note_prefill_suffix_scheduled(common_speculative * spec) {
+    if (spec == nullptr) {
+        return;
+    }
+    for (auto & impl : spec->impls) {
+        impl->note_prefill_suffix_scheduled();
     }
 }
 
