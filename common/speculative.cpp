@@ -1843,17 +1843,18 @@ struct common_speculative_state_dflash : public common_speculative_state {
         target_capture_enabled = enabled;
 
         if (enabled) {
-            if (!capture_layers.empty()) {
-                llama_set_dflash_capture(ctx_tgt, capture_layers.data(), (int32_t) capture_layers.size());
-            }
-            llama_set_dflash_gpu_capture(ctx_tgt, gpu_capture_available);
+            // Restore logical capture activity.  The layer configuration,
+            // GPU buffers, and tape metadata were preserved across the
+            // temporary disable, so no re-allocation is needed.
+            llama_set_dflash_capture_active(ctx_tgt, true);
             if (profile) {
                 LOG_INF("dflash prefill capture: enabled hidden capture gpu=%d layers=%d\n",
                         gpu_capture_available ? 1 : 0, (int) capture_layers.size());
             }
         } else {
-            llama_set_dflash_capture(ctx_tgt, nullptr, 0);
-            llama_set_dflash_gpu_capture(ctx_tgt, false);
+            // Logically disable hidden capture without destroying GPU
+            // buffers, tape metadata, or layer configuration.
+            llama_set_dflash_capture_active(ctx_tgt, false);
             if (profile) {
                 LOG_INF("dflash prefill capture: disabled hidden capture for non-suffix prompt chunk\n");
             }

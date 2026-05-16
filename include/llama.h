@@ -1088,6 +1088,13 @@ extern "C" {
     // Pass n_layers=0 to disable capture
     LLAMA_API void llama_set_dflash_capture(struct llama_context * ctx, const int32_t * layer_ids, int32_t n_layers);
 
+    // DFlash: logically enable/disable hidden capture for a decode view without
+    // destroying GPU buffers, tape metadata, or layer configuration.
+    // When active=false, the eval callback is removed so graph builds and compute
+    // skip hidden outputs entirely.  When active=true, the callback is restored
+    // if layer_ids are configured.  GPU buffers and tape state are preserved.
+    LLAMA_API void llama_set_dflash_capture_active(struct llama_context * ctx, bool active);
+
     // DFlash: enable graph-embedded GPU hidden/tape capture for target decode.
     // Disable this before decode when the drafter cannot consume GPU cross-ring
     // tensors directly, so the eval callback keeps CPU hidden buffers populated.

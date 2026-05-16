@@ -1400,44 +1400,43 @@ void llama_context::set_dflash_n_slots(int n) {
 
 void llama_context::set_dflash_capture(const int32_t * layer_ids, int32_t n_layers) {
     if (layer_ids == nullptr || n_layers <= 0) {
-        // Clear DFlash hidden capture. Subsequent graph builds and eval callbacks
-        // must not ask/read l_out tensors for DFlash hidden layers.
+        // Permanent deconfiguration: clear layer config and remove callback.
+        // For temporary per-view capture toggling, use set_dflash_capture_active()
+        // instead, which preserves GPU buffers and layer configuration.
         cparams.dflash_capture_layers.clear();
 
         if (dflash_capture) {
             dflash_capture->layer_ids.clear();
             dflash_capture->hidden_name_idx.clear();
             dflash_capture->tensor_names.clear();
-            dflash_capture->profile_cb_hidden_ask = 0;
-            dflash_capture->profile_cb_hidden_read = 0;
+            dflash_capture->capture_active = false;
         }
 
-        // Remove eval callback so target graph builds skip hidden outputs
-        // and the callback is not invoked at all for disabled layers.
         cparams.cb_eval = nullptr;
         cparams.cb_eval_user_data = nullptr;
-
-        // Clear captured hidden state buffers
-        for (auto & slot_bufs : layer_hiddens) {
-            for (auto & buf : slot_bufs) {
-                buf.n_tokens = 0;
-                std::vector<float>().swap(buf.data);
-            }
-        }
 
         return;
     }
 
-    // store layer IDs for the graph builder (still needed so qwen35.cpp knows which layers)
+    // Store layer IDs for the graph builder.
     cparams.dflash_capture_layers.clear();
     for (int32_t i = 0; i < n_layers; ++i) {
         cparams.dflash_capture_layers.push_back(layer_ids[i]);
     }
 
-    // set up eval callback for zero-graph-modification capture
-    dflash_capture = std::make_unique<dflash_capture_data>();
-    dflash_capture->hiddens = &layer_hiddens;
-    dflash_capture->profile = dflash_profile_enabled();
+    // Initialise or reconfigure the capture data without destroying GPU
+    // buffers, tape metadata, or profile state that may already exist.
+    if (!dflash_capture) {
+        dflash_capture = std::make_unique<dflash_capture_data>();
+        dflash_capture->hiddens = &layer_hiddens;
+        dflash_capture->profile = dflash_profile_enabled();
+    }
+
+    dflash_capture->capture_active = true;
+    dflash_capture->layer_ids.clear();
+    dflash_capture->hidden_name_idx.clear();
+    dflash_capture->tensor_names.clear();
+
     layer_hiddens.assign(1, std::vector<dflash_layer_hidden_buf>(n_layers));
 
     for (int32_t i = 0; i < n_layers; ++i) {
@@ -1447,7 +1446,9 @@ void llama_context::set_dflash_capture(const int32_t * layer_ids, int32_t n_laye
         dflash_capture->tensor_names.push_back(std::move(name));
     }
 
-    // install our eval callback (replaces any existing one)
+    // Install our eval callback (replaces any existing one).
+    // The decode loop may override this to nullptr when GPU graph-embedded
+    // capture is ready (see dflash_capture block in decode).
     cparams.cb_eval = dflash_eval_callback;
     cparams.cb_eval_user_data = dflash_capture.get();
 
@@ -1461,6 +1462,51 @@ void llama_context::set_dflash_capture(const int32_t * layer_ids, int32_t n_laye
     }
 }
 
+void llama_context::set_dflash_capture_active(bool active) {
+    if (!dflash_capture) {
+        return;
+    }
+
+    if (dflash_capture->capture_active == active) {
+        return;
+    }
+
+    dflash_capture->capture_active = active;
+
+    if (active) {
+        // Restore capture callback if layer configuration exists.
+        // The decode loop will further refine cb_eval based on GPU
+        // hidden/tape readiness (see the dflash_capture block in decode).
+        if (!dflash_capture->layer_ids.empty()) {
+            cparams.cb_eval = dflash_eval_callback;
+            cparams.cb_eval_user_data = dflash_capture.get();
+        }
+        if (memory) {
+            memory->set_force_split_seq(true);
+        }
+    } else {
+        // Remove the eval callback so graph builds and compute skip
+        // hidden outputs entirely.  Do NOT destroy GPU buffers, tape
+        // metadata, layer configuration, or profile counters.
+        cparams.cb_eval = nullptr;
+        cparams.cb_eval_user_data = nullptr;
+        cparams.hidden_gpu_n_seqs = 0;
+        cparams.tape_gpu_n_seqs = 0;
+        cparams.tape_gpu = nullptr;
+        for (int s = 0; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
+            cparams.hidden_gpu_seqs[s] = nullptr;
+            cparams.tape_gpu_seqs[s] = nullptr;
+        }
+    }
+
+    cparams.dflash_capture_layers.clear();
+    if (active && !dflash_capture->layer_ids.empty()) {
+        for (auto lid : dflash_capture->layer_ids) {
+            cparams.dflash_capture_layers.push_back(lid);
+        }
+    }
+}
+
 void llama_context::set_dflash_gpu_capture(bool enabled) {
     if (!dflash_capture) {
         return;
@@ -1468,21 +1514,31 @@ void llama_context::set_dflash_gpu_capture(bool enabled) {
 
     dflash_capture->gpu_capture_enabled = enabled;
 
-    if (enabled) {
-        return;
-    }
-
-    dflash_capture->hidden_gpu.clear();
-    dflash_capture->tapes.clear();
-    cparams.tape_gpu = nullptr;
-    cparams.tape_gpu_n_seqs = 0;
+    // Always clear the graph-embedded capture cparams when changing mode;
+    // the decode loop will repopulate them if GPU capture is active and
+    // buffers are valid.  Do NOT destroy hidden_gpu/tapes vectors — those
+    // are persistent GPU allocations that survive logical toggles.
     cparams.hidden_gpu_n_seqs = 0;
+    cparams.tape_gpu_n_seqs = 0;
+    cparams.tape_gpu = nullptr;
     for (int s = 0; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
         cparams.tape_gpu_seqs[s] = nullptr;
         cparams.hidden_gpu_seqs[s] = nullptr;
     }
-    cparams.cb_eval = dflash_eval_callback;
-    cparams.cb_eval_user_data = dflash_capture.get();
+
+    if (!enabled) {
+        // When GPU capture is disabled but logical capture is still active,
+        // the decode loop needs the eval callback for CPU fallback.
+        // When logical capture is inactive, the callback should stay null.
+        if (dflash_capture->capture_active && !dflash_capture->layer_ids.empty()) {
+            cparams.cb_eval = dflash_eval_callback;
+            cparams.cb_eval_user_data = dflash_capture.get();
+        }
+        // If GPU buffers were previously allocated and dimensions now differ,
+        // reallocate. Otherwise keep existing buffers.
+    }
+    // When enabled is true, keep buffers as-is. The decode loop's
+    // allocate_tape_gpu path handles slot-count changes.
 }
 
 void llama_context::dflash_reset_hidden_capture() {
@@ -4731,91 +4787,109 @@ int llama_context::decode(const llama_batch & batch_inp) {
     do {
         const auto & ubatch = mctx->get_ubatch();
 
-        // DFlash: hand the eval callback this ubatch so it can route hidden-state
-        // captures per-token (multi-seq) or whole-tensor (single-seq) to the
-        // correct layer_hiddens slot. Populate per-seq tape pointers for the
-        // graph builder so GPU tape copies target the correct per-slot buffers.
-        if (dflash_capture) {
-            const bool dflash_gpu_capture_ready = model.n_devices() <= 1 && dflash_capture->gpu_capture_enabled;
-            dflash_capture->ubatch = &ubatch;
-            cparams.hidden_gpu_n_seqs = 0;
-            for (int s = 0; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
-                cparams.hidden_gpu_seqs[s] = nullptr;
-            }
+            // DFlash: hand the eval callback this ubatch so it can route hidden-state
+            // captures per-token (multi-seq) or whole-tensor (single-seq) to the
+            // correct layer_hiddens slot. Populate per-seq tape pointers for the
+            // graph builder so GPU tape copies target the correct per-slot buffers.
+            if (dflash_capture) {
+                // When capture is logically inactive, clear the callback so
+                // graph builds and compute skip hidden outputs entirely.
+                if (!dflash_capture->capture_active) {
+                    cparams.cb_eval = nullptr;
+                    cparams.cb_eval_user_data = nullptr;
+                    cparams.hidden_gpu_n_seqs = 0;
+                    cparams.tape_gpu_n_seqs = 0;
+                    cparams.tape_gpu = nullptr;
+                    for (int s = 0; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
+                        cparams.tape_gpu_seqs[s] = nullptr;
+                        cparams.hidden_gpu_seqs[s] = nullptr;
+                    }
+                    dflash_capture->ubatch = &ubatch;
+                } else {
+                    const bool dflash_gpu_capture_ready = model.n_devices() <= 1 && dflash_capture->gpu_capture_enabled;
+                    dflash_capture->ubatch = &ubatch;
+                    cparams.hidden_gpu_n_seqs = 0;
+                    for (int s = 0; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
+                        cparams.hidden_gpu_seqs[s] = nullptr;
+                    }
 
-            // populate per-seq DFlash GPU capture pointers for graph builder
-            bool dflash_graph_hidden_ready = false;
-            if (!dflash_capture->tapes.empty()) {
-                const int ns = std::min((int) ubatch.n_seqs_unq, (int) LLAMA_DFLASH_MAX_SLOTS);
-                const bool dflash_graph_tape_ready =
-                    dflash_gpu_capture_ready &&
-                    dflash_capture->tape_enabled &&
-                    ubatch.n_seq_tokens <= LLAMA_DFLASH_MAX_VERIFY_TOKENS;
-                const int tape_ns = dflash_graph_tape_ready ? ns : 0;
+                    // populate per-seq DFlash GPU capture pointers for graph builder
+                    bool dflash_graph_hidden_ready = false;
+                    const int ns = std::min((int) ubatch.n_seqs_unq, (int) LLAMA_DFLASH_MAX_SLOTS);
 
-                bool seqs_changed = (tape_ns != cparams.tape_gpu_n_seqs);
-                dflash_graph_hidden_ready =
-                    !dflash_capture->hidden_gpu.empty() &&
-                    dflash_gpu_capture_ready &&
-                    !tree_bufs.active &&
-                    ubatch.n_seq_tokens <= LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+                    // Hidden GPU readiness does not depend on tape state.
+                    dflash_graph_hidden_ready =
+                        !dflash_capture->hidden_gpu.empty() &&
+                        dflash_gpu_capture_ready &&
+                        !tree_bufs.active &&
+                        ubatch.n_seq_tokens <= LLAMA_DFLASH_MAX_VERIFY_TOKENS;
 
-                for (int s = 0; s < ns; ++s) {
-                    const llama_seq_id seq = ubatch.seq_id_unq[s];
-                    dflash_tape_gpu * tp = nullptr;
-                    dflash_hidden_gpu * hp = nullptr;
-                    if (seq >= 0 && seq < (int) dflash_capture->tapes.size()) {
-                        tp = dflash_capture->tapes[seq].get();
-                        if (tp) {
-                            tp->n_tokens = ubatch.n_seq_tokens <= (uint32_t) tp->max_tokens ? (int) ubatch.n_seq_tokens : 0;
+                    // Tape readiness depends on tape buffers being allocated and enabled.
+                    const bool dflash_graph_tape_ready =
+                        !dflash_capture->tapes.empty() &&
+                        dflash_gpu_capture_ready &&
+                        dflash_capture->tape_enabled &&
+                        ubatch.n_seq_tokens <= LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+                    const int tape_ns = dflash_graph_tape_ready ? ns : 0;
+
+                    bool seqs_changed = (tape_ns != cparams.tape_gpu_n_seqs);
+
+                    for (int s = 0; s < ns; ++s) {
+                        const llama_seq_id seq = ubatch.seq_id_unq[s];
+                        dflash_tape_gpu * tp = nullptr;
+                        dflash_hidden_gpu * hp = nullptr;
+                        if (seq >= 0 && seq < (int) dflash_capture->tapes.size()) {
+                            tp = dflash_capture->tapes[seq].get();
+                            if (tp) {
+                                tp->n_tokens = ubatch.n_seq_tokens <= (uint32_t) tp->max_tokens ? (int) ubatch.n_seq_tokens : 0;
+                            }
+                        }
+                        if (seq >= 0 && seq < (int) dflash_capture->hidden_gpu.size()) {
+                            hp = dflash_capture->hidden_gpu[seq].get();
+                            if (hp) {
+                                hp->n_tokens = ubatch.n_seq_tokens <= (uint32_t) hp->max_tokens ? (int) ubatch.n_seq_tokens : 0;
+                            }
+                        }
+                        dflash_tape_gpu * graph_tp = dflash_graph_tape_ready ? tp : nullptr;
+                        if (graph_tp != cparams.tape_gpu_seqs[s]) {
+                            seqs_changed = true;
+                        }
+                        cparams.tape_gpu_seqs[s] = graph_tp;
+                        cparams.hidden_gpu_seqs[s] = hp;
+                        dflash_graph_hidden_ready = dflash_graph_hidden_ready && hp && hp->n_tokens > 0;
+                    }
+                    for (int s = ns; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
+                        if (cparams.tape_gpu_seqs[s] != nullptr) {
+                            seqs_changed = true;
+                        }
+                        cparams.tape_gpu_seqs[s] = nullptr;
+                        cparams.hidden_gpu_seqs[s] = nullptr;
+                    }
+                    cparams.tape_gpu_n_seqs = tape_ns;
+                    cparams.hidden_gpu_n_seqs = dflash_graph_hidden_ready ? ns : 0;
+
+                    // sentinel for "GPU tape graph copies are active"
+                    cparams.tape_gpu = tape_ns > 0 ? cparams.tape_gpu_seqs[0] : nullptr;
+
+                    // graph nodes hold references to tape tensors — invalidate if set changed
+                    if (seqs_changed && gf_res_prev) {
+                        gf_res_prev->reset();
+                    }
+
+                    // track active slot for single-seq (used by active_tape() in eval callback)
+                    if (ubatch.n_seqs_unq == 1) {
+                        const llama_seq_id seq = ubatch.seq_id_unq[0];
+                        if (seq >= 0 && seq < (int) dflash_capture->tapes.size()) {
+                            dflash_capture->active_tape_idx = seq;
                         }
                     }
-                    if (seq >= 0 && seq < (int) dflash_capture->hidden_gpu.size()) {
-                        hp = dflash_capture->hidden_gpu[seq].get();
-                        if (hp) {
-                            hp->n_tokens = ubatch.n_seq_tokens <= (uint32_t) hp->max_tokens ? (int) ubatch.n_seq_tokens : 0;
-                        }
-                    }
-                    dflash_tape_gpu * graph_tp = dflash_graph_tape_ready ? tp : nullptr;
-                    if (graph_tp != cparams.tape_gpu_seqs[s]) {
-                        seqs_changed = true;
-                    }
-                    cparams.tape_gpu_seqs[s] = graph_tp;
-                    cparams.hidden_gpu_seqs[s] = hp;
-                    dflash_graph_hidden_ready = dflash_graph_hidden_ready && hp && hp->n_tokens > 0;
-                }
-                for (int s = ns; s < (int) LLAMA_DFLASH_MAX_SLOTS; ++s) {
-                    if (cparams.tape_gpu_seqs[s] != nullptr) {
-                        seqs_changed = true;
-                    }
-                    cparams.tape_gpu_seqs[s] = nullptr;
-                    cparams.hidden_gpu_seqs[s] = nullptr;
-                }
-                cparams.tape_gpu_n_seqs = tape_ns;
-                cparams.hidden_gpu_n_seqs = dflash_graph_hidden_ready ? ns : 0;
 
-                // sentinel for "GPU tape graph copies are active"
-                cparams.tape_gpu = tape_ns > 0 ? cparams.tape_gpu_seqs[0] : nullptr;
-
-                // graph nodes hold references to tape tensors — invalidate if set changed
-                if (seqs_changed && gf_res_prev) {
-                    gf_res_prev->reset();
+                    ggml_backend_sched_eval_callback cb_eval_new = dflash_graph_hidden_ready ? nullptr : dflash_eval_callback;
+                    void * cb_eval_user_data_new = dflash_graph_hidden_ready ? nullptr : dflash_capture.get();
+                    cparams.cb_eval = cb_eval_new;
+                    cparams.cb_eval_user_data = cb_eval_user_data_new;
                 }
             }
-
-            // track active slot for single-seq (used by active_tape() in eval callback)
-            if (ubatch.n_seqs_unq == 1) {
-                const llama_seq_id seq = ubatch.seq_id_unq[0];
-                if (seq >= 0 && seq < (int) dflash_capture->tapes.size()) {
-                    dflash_capture->active_tape_idx = seq;
-                }
-            }
-
-            ggml_backend_sched_eval_callback cb_eval_new = dflash_graph_hidden_ready ? nullptr : dflash_eval_callback;
-            void * cb_eval_user_data_new = dflash_graph_hidden_ready ? nullptr : dflash_capture.get();
-            cparams.cb_eval = cb_eval_new;
-            cparams.cb_eval_user_data = cb_eval_user_data_new;
-        }
 
         // count the outputs in this ubatch
         {
@@ -6415,6 +6489,10 @@ int32_t llama_get_n_layer_hiddens(llama_context * ctx) {
 
 void llama_set_dflash_capture(llama_context * ctx, const int32_t * layer_ids, int32_t n_layers) {
     ctx->set_dflash_capture(layer_ids, n_layers);
+}
+
+void llama_set_dflash_capture_active(llama_context * ctx, bool active) {
+    ctx->set_dflash_capture_active(active);
 }
 
 void llama_set_dflash_gpu_capture(llama_context * ctx, bool enabled) {

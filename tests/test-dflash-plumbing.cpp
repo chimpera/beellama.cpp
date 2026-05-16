@@ -416,8 +416,21 @@ int main(int argc, char ** argv) {
     ok &= expect(speculative.find("set_prefill_capture_enabled(bool") != std::string::npos,
         "DFlash state must implement hidden-capture enable/disable");
 
-    ok &= expect(speculative.find("llama_set_dflash_capture(ctx_tgt, nullptr, 0)") != std::string::npos,
-        "DFlash hidden capture must be disabled by clearing capture layers");
+    ok &= expect(speculative.find("llama_set_dflash_capture_active") != std::string::npos,
+        "DFlash prefill toggle must use the non-destructive capture-active API");
+
+    ok &= expect(llama_h.find("llama_set_dflash_capture_active") != std::string::npos,
+        "public API must expose llama_set_dflash_capture_active");
+
+    ok &= expect(context_h.find("capture_active = true") != std::string::npos,
+        "dflash_capture_data must track logical capture activity separately from layer config");
+
+    ok &= expect(context_cpp.find("set_dflash_capture_active") != std::string::npos &&
+                 context_cpp.find("dflash_capture->capture_active") != std::string::npos,
+        "llama_context must implement logical capture-active toggle");
+
+    ok &= expect(speculative_h.find("common_speculative_set_prefill_capture_enabled") != std::string::npos,
+        "DFlash must expose a prefill hidden-capture toggle");
 
     ok &= expect(speculative.find("dflash prefill capture: disabled hidden capture") != std::string::npos,
         "DFlash capture disable path must be profile-loggable");
@@ -435,9 +448,14 @@ int main(int argc, char ** argv) {
                  server_context.find("dflash_capture_needed_for_view = true") != std::string::npos,
         "server must keep DFlash hidden capture enabled for generation/verification");
 
-    ok &= expect(context_cpp.find("layer_ids == nullptr") != std::string::npos &&
-                 context_cpp.find("n_layers <= 0") != std::string::npos,
-        "llama_set_dflash_capture must support clearing capture layers");
+    ok &= expect(context_cpp.find("capture_active = false") != std::string::npos,
+        "set_dflash_capture(nullptr) must mark capture as inactive");
+
+    ok &= expect(context_cpp.find("!dflash_capture->capture_active") != std::string::npos,
+        "decode loop must check capture_active before setting eval callback");
+
+    ok &= expect(context_cpp.find("capture_active && !dflash_capture->layer_ids.empty()") != std::string::npos,
+        "capture re-enable must check both active flag and layer config");
 
     return ok ? 0 : 1;
 }

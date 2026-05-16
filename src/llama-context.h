@@ -108,6 +108,11 @@ struct llama_tree_mask {
 
 // DFlash: eval callback data for hidden state capture + tape recording
 struct dflash_capture_data {
+    // Logical per-view capture gate. When false, the eval callback is not
+    // installed and graph builds skip hidden outputs. Layer IDs, GPU buffers,
+    // tape metadata, and profile counters are preserved across toggles.
+    bool capture_active = true;
+
     // hidden state capture (for drafter conditioning)
     std::vector<int32_t> layer_ids;           // layer indices to capture
     std::vector<std::string> tensor_names;    // pre-formatted "l_out-{id}" names
@@ -477,6 +482,7 @@ public:
 
     // DFlash: configure hidden state capture layers
     void set_dflash_capture(const int32_t * layer_ids, int32_t n_layers);
+    void set_dflash_capture_active(bool active);
     void set_dflash_gpu_capture(bool enabled);
     void set_dflash_sample_temp(float temp);
     void set_dflash_topk(int k);
