@@ -370,7 +370,6 @@ void llm_graph_input_dflash::set_input(const llama_ubatch * ubatch) {
         const int n_seq_tokens    = (int)(n_block / n_seqs);
         const size_t n_feat       = cross ? (size_t) cross->n_embd : 0;
 
-        // collect per-slot cross data
         // collect per-slot cross data. Each slot may be CPU-backed or GPU-backed.
         struct slot_cross_info {
             const float * data = nullptr;
