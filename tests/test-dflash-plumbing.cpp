@@ -637,5 +637,23 @@ int main(int argc, char ** argv) {
     ok &= expect(context_cpp.find("prefill_plan.n_tokens") != std::string::npos,
         "decode loop must allocate prefill GPU based on plan n_tokens");
 
+    // Graph reuse must key on prefill intersection offsets
+    ok &= expect(graph_h.find("dflash_prefill_src_offset") != std::string::npos,
+        "graph reuse must key on DFlash prefill src_offset because ggml_view offsets are topology");
+    ok &= expect(graph_h.find("dflash_prefill_dst_offset") != std::string::npos,
+        "graph reuse must key on DFlash prefill dst_offset because staging write offset is topology");
+
+    // Per-view capture plan: span must use span_begin/span_end, not global window
+    ok &= expect(server_context.find("span.capture_begin = span_begin") != std::string::npos,
+        "server must set capture_begin to per-view span_begin, not global capture_from");
+    ok &= expect(server_context.find("span.capture_end") != std::string::npos && server_context.find("span_end") != std::string::npos,
+        "server must set capture_end to per-view span_end, not global prompt_total");
+
+    // Capture toggle must clear prefill cparams
+    ok &= expect(context_cpp.find("cparams.dflash_prefill_capture_active = false") != std::string::npos,
+        "set_dflash_capture_active(false) must clear dflash_prefill_capture_active");
+    ok &= expect(context_cpp.find("prefill_gpu_seqs[s] = nullptr") != std::string::npos,
+        "set_dflash_capture_active(false) must clear prefill_gpu_seqs");
+
     return ok ? 0 : 1;
 }
