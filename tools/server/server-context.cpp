@@ -4270,8 +4270,11 @@ private:
 
             common_dflash_prefill_span span;
             span.should_flush = true;
-            span.capture_begin = capture_from;
-            span.capture_end   = prompt_total;
+            // Per-view capture window: each outer server batch captures only
+            // its own intersection with the useful suffix. Later views append
+            // to the ring cleanly without overwriting previous flushes.
+            span.capture_begin = span_begin;
+            span.capture_end   = span_end;
             span.src_offset   = src_offset;
             span.n_tokens     = n_tokens;
 
