@@ -859,7 +859,10 @@ void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
 }
 
 void llm_graph_result::set_outputs() {
-    if (t_logits != nullptr) {
+    const bool skip_logits_output =
+        params.cparams.dflash_reduced_consumer_active && t_logits_argmax != nullptr;
+
+    if (t_logits != nullptr && !skip_logits_output) {
         ggml_set_output(t_logits);
     }
     if (t_logits_argmax != nullptr) {

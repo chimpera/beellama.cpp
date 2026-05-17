@@ -5645,7 +5645,10 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto n_vocab    = vocab.n_tokens();
     const auto n_embd_out = hparams.n_embd_out();
 
-    bool has_logits = true;
+    const bool dflash_reduced_logits_only =
+        cparams.dflash_reduced_consumer_active && cparams.dflash_verify_logits;
+
+    bool has_logits = !dflash_reduced_logits_only;
     bool has_embd   = cparams.embeddings;
 
     // TODO: hacky enc-dec support
@@ -5674,9 +5677,10 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     }
 
     const size_t prev_size = buf_output ? ggml_backend_buffer_get_size(buf_output.get()) : 0;
-    const size_t new_size  =
+    const size_t new_size_required =
         (logits.size + embd.size + backend_float_count) * sizeof(float) +
         (                          backend_token_count) * sizeof(llama_token);
+    const size_t new_size = std::max<size_t>(new_size_required, 1);
 
     // alloc only when more than the current capacity is required
     // TODO: also consider shrinking the buffer

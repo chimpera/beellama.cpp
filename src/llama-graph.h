@@ -702,6 +702,7 @@ struct llm_graph_params {
             cparams.causal_attn == other.cparams.causal_attn &&
             cparams.dflash_verify_logits == other.cparams.dflash_verify_logits &&
             cparams.dflash_verify_topk   == other.cparams.dflash_verify_topk &&
+            cparams.dflash_reduced_consumer_active == other.cparams.dflash_reduced_consumer_active &&
             cparams.hidden_gpu_n_seqs    == other.cparams.hidden_gpu_n_seqs &&
             cparams.prefill_gpu_n_seqs   == other.cparams.prefill_gpu_n_seqs &&
             cparams.tape_gpu             == other.cparams.tape_gpu &&

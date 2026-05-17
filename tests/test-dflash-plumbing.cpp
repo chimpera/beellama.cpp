@@ -332,6 +332,14 @@ int main(int argc, char ** argv) {
     ok &= expect(llama_h.find("llama_set_dflash_verify_logits") != std::string::npos, "public API must gate target verifier reduction");
     ok &= expect(llama_h.find("llama_set_dflash_consume_reduced") != std::string::npos, "public API must expose reduced verifier consumption without topology changes");
     ok &= expect(llama_h.find("llama_get_logits_argmax_ith") != std::string::npos, "public API must expose reduced logits by batch row");
+    ok &= expect(graph_h.find("cparams.dflash_reduced_consumer_active == other.cparams.dflash_reduced_consumer_active") != std::string::npos,
+        "graph reuse must invalidate when reduced verifier raw-logit output lifetime changes");
+    ok &= expect(graph_cpp.find("skip_logits_output") != std::string::npos &&
+                 graph_cpp.find("dflash_reduced_consumer_active && t_logits_argmax != nullptr") != std::string::npos,
+        "reduced verifier graphs must not keep full raw logits as graph outputs when compact logits are consumed");
+    ok &= expect(context_cpp.find("dflash_reduced_logits_only") != std::string::npos &&
+                 context_cpp.find("has_logits = !dflash_reduced_logits_only") != std::string::npos,
+        "reduced verifier decode must avoid reserving a raw logits CPU output buffer");
     const size_t set_verify_pos = context_cpp.find("void llama_context::set_dflash_verify_logits");
     const size_t set_slots_pos = context_cpp.find("void llama_context::set_dflash_n_slots", set_verify_pos);
     ok &= expect(set_verify_pos != std::string::npos && set_slots_pos != std::string::npos &&
