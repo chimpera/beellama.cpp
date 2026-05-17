@@ -4807,6 +4807,12 @@ int llama_context::decode(const llama_batch & batch_inp) {
         ggml_status status;
         const int64_t t_dflash_decode_start_us = dflash_capture && dflash_capture->profile ? ggml_time_us() : 0;
         const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status);
+        // DFlash: synchronize backends before ring_write reads GPU-rendered
+        // hidden tensors via cudaStreamPerThread (different stream than ggml's
+        // private CUDA stream, so no implicit ordering)
+        if (dflash_capture) {
+            ggml_backend_sched_synchronize(sched.get());
+        }
         if (dflash_capture && dflash_capture->profile && t_dflash_decode_start_us != 0) {
             dflash_capture->profile_decode_us += ggml_time_us() - t_dflash_decode_start_us;
         }
