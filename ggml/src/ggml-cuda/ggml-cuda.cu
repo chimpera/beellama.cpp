@@ -4788,6 +4788,29 @@ bool ggml_backend_is_cuda(ggml_backend_t backend) {
     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_cuda_guid());
 }
 
+extern "C" bool dflash_cuda_backend_wait_for_stream(ggml_backend_t backend) {
+    if (!ggml_backend_is_cuda(backend)) {
+        return false;
+    }
+
+    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+    ggml_cuda_set_device(cuda_ctx->device);
+
+    cudaEvent_t event = nullptr;
+    cudaError_t err = cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
+    if (err != cudaSuccess) {
+        return false;
+    }
+
+    err = cudaEventRecord(event, cuda_ctx->stream());
+    if (err == cudaSuccess) {
+        err = cudaStreamWaitEvent(cudaStreamPerThread, event, 0);
+    }
+
+    cudaEventDestroy(event);
+    return err == cudaSuccess;
+}
+
 int ggml_backend_cuda_get_device_count() {
     return ggml_cuda_info().device_count;
 }
@@ -5577,6 +5600,7 @@ extern "C" bool   dflash_cuda_copy_d2d(void *, const void *, size_t);
 extern "C" bool   dflash_cuda_prepare_ptr(const void *);
 extern "C" bool   dflash_cuda_copy_d2d_no_check(void *, const void *, size_t);
 extern "C" bool   dflash_cuda_synchronize_ptr(const void *);
+extern "C" bool   dflash_cuda_backend_wait_for_stream(ggml_backend_t);
 extern "C" bool dflash_replay_gdn_state_no_check(void *, const void *, const void *, const void *, const void *, int, int, int, int);
 extern "C" void   dflash_cross_ring_gpu_synchronize(void *);
 extern "C" const float * dflash_cross_ring_gpu_interleave(void *, int, int, int);
@@ -5635,6 +5659,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "dflash_cuda_synchronize_ptr") == 0) {
         return (void *)dflash_cuda_synchronize_ptr;
+    }
+    if (strcmp(name, "dflash_cuda_backend_wait_for_stream") == 0) {
+        return (void *)dflash_cuda_backend_wait_for_stream;
     }
     if (strcmp(name, "dflash_replay_gdn_state_no_check") == 0) {
         return (void *)dflash_replay_gdn_state_no_check;

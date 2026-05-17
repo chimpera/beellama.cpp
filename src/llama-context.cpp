@@ -1829,29 +1829,46 @@ void llama_context::allocate_hidden_gpu(int n_slots, int max_tokens) {
     }
     if (!dflash_capture->gpu_capture_enabled) {
         dflash_capture->hidden_gpu.clear();
+        dflash_capture->fn_sync_backend_to_stream = nullptr;
+        dflash_capture->sync_backend_to_stream_backend = nullptr;
         return;
     }
     if (model.n_devices() > 1) {
         dflash_capture->hidden_gpu.clear();
+        dflash_capture->fn_sync_backend_to_stream = nullptr;
+        dflash_capture->sync_backend_to_stream_backend = nullptr;
         return;
     }
     if (!llama_dflash_gpu_hidden_supported_arch(model.arch)) {
         dflash_capture->hidden_gpu.clear();
+        dflash_capture->fn_sync_backend_to_stream = nullptr;
+        dflash_capture->sync_backend_to_stream_backend = nullptr;
         return;
     }
 
     ggml_backend_t gpu_backend = nullptr;
+    ggml_backend_reg_t cuda_reg = nullptr;
     for (auto & backend : backends) {
         auto * dev = ggml_backend_get_device(backend.get());
         if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
             gpu_backend = backend.get();
+            cuda_reg = ggml_backend_dev_backend_reg(dev);
             break;
         }
     }
     if (!gpu_backend) {
         dflash_capture->hidden_gpu.clear();
+        dflash_capture->fn_sync_backend_to_stream = nullptr;
+        dflash_capture->sync_backend_to_stream_backend = nullptr;
         return;
     }
+
+    dflash_capture->fn_sync_backend_to_stream = cuda_reg
+        ? (dflash_capture_data::sync_backend_to_stream_fn_t)
+            ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cuda_backend_wait_for_stream")
+        : nullptr;
+    dflash_capture->sync_backend_to_stream_backend =
+        dflash_capture->fn_sync_backend_to_stream ? gpu_backend : nullptr;
 
     const int n_layers = (int) dflash_capture->layer_ids.size();
     const int64_t n_embd = model.hparams.n_embd;
@@ -1927,15 +1944,24 @@ bool llama_context::allocate_prefill_gpu(int n_slots, int max_tokens) {
     }
 
     ggml_backend_t gpu_backend = nullptr;
+    ggml_backend_reg_t cuda_reg = nullptr;
     for (auto & backend : backends) {
         auto * dev = ggml_backend_get_device(backend.get());
         if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
             gpu_backend = backend.get();
+            cuda_reg = ggml_backend_dev_backend_reg(dev);
             break;
         }
     }
     if (!gpu_backend) {
         return false;
+    }
+    if (!dflash_capture->fn_sync_backend_to_stream && cuda_reg) {
+        dflash_capture->fn_sync_backend_to_stream =
+            (dflash_capture_data::sync_backend_to_stream_fn_t)
+                ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cuda_backend_wait_for_stream");
+        dflash_capture->sync_backend_to_stream_backend =
+            dflash_capture->fn_sync_backend_to_stream ? gpu_backend : nullptr;
     }
 
     const int n_layers = (int) dflash_capture->layer_ids.size();
@@ -1987,6 +2013,26 @@ bool llama_context::allocate_prefill_gpu(int n_slots, int max_tokens) {
     LLAMA_LOG_INFO("%s: allocated prefill GPU staging buffers: %.1f MB total (%d slot%s, %d layers, %d max tokens)\n",
         __func__, total_size / (1024.0 * 1024.0), n_slots, n_slots == 1 ? "" : "s", n_layers, max_tokens);
     return true;
+}
+
+bool llama_context::dflash_wait_for_gpu_capture_stream() {
+    if (!dflash_capture) {
+        return false;
+    }
+
+    const bool graph_gpu_capture_active =
+        cparams.hidden_gpu_n_seqs > 0 ||
+        cparams.prefill_gpu_n_seqs > 0 ||
+        cparams.tape_gpu_n_seqs > 0;
+
+    if (!graph_gpu_capture_active) {
+        return false;
+    }
+
+    auto fn = dflash_capture->fn_sync_backend_to_stream;
+    auto backend = dflash_capture->sync_backend_to_stream_backend;
+
+    return fn && backend && fn(backend);
 }
 
 void llama_context::dflash_prefill_capture_begin(llama_seq_id seq_id, int32_t capture_begin, int32_t capture_end) {
@@ -5312,10 +5358,11 @@ int llama_context::decode(const llama_batch & batch_inp) {
         ggml_status status;
         const int64_t t_dflash_decode_start_us = dflash_capture && dflash_capture->profile ? ggml_time_us() : 0;
         const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status);
-        // DFlash: synchronize backends before ring_write reads GPU-rendered
-        // hidden tensors via cudaStreamPerThread (different stream than ggml's
-        // private CUDA stream, so no implicit ordering)
-        if (dflash_capture) {
+        // DFlash GPU graph capture writes hidden tensors on GGML's CUDA stream,
+        // while the cross-ring D2D copies run on cudaStreamPerThread. Prefer a
+        // CUDA event dependency between those streams; fall back to the full
+        // scheduler sync for CPU callback capture or backends without the helper.
+        if (dflash_capture && !dflash_wait_for_gpu_capture_stream()) {
             ggml_backend_sched_synchronize(sched.get());
         }
         if (dflash_capture && dflash_capture->profile && t_dflash_decode_start_us != 0) {

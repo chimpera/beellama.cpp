@@ -226,6 +226,10 @@ struct dflash_capture_data {
     uint64_t profile_conv_write_wait_us = 0;
     std::unordered_map<std::string, uint64_t> profile_cb_names;
 
+    using sync_backend_to_stream_fn_t = bool (*)(ggml_backend_t);
+    sync_backend_to_stream_fn_t fn_sync_backend_to_stream = nullptr;
+    ggml_backend_t sync_backend_to_stream_backend = nullptr;
+
     dflash_tape_gpu * active_tape() const {
         return (active_tape_idx >= 0 && active_tape_idx < (int) tapes.size())
                    ? tapes[active_tape_idx].get()
@@ -598,6 +602,7 @@ public:
     // for one ubatch worth of tokens (typically 128-512). Lazily allocated on first
     // suffix prefill. Returns true if allocation succeeded or buffers already exist.
     bool allocate_prefill_gpu(int n_slots, int max_tokens);
+    bool dflash_wait_for_gpu_capture_stream();
 
     // DFlash: select which slot's tape the next llama_decode() writes into.
     // Must be called before each decode when multi-slot tape is in use.

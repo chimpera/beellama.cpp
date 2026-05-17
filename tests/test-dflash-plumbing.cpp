@@ -103,6 +103,14 @@ int main(int argc, char ** argv) {
         "graph reuse must not treat eval callback changes as topology changes");
     ok &= expect(context_cpp.find("ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);\n\n    // set the input data") != std::string::npos,
         "process_ubatch must refresh the scheduler eval callback before every compute, including graph reuse");
+    ok &= expect(cuda_cpp.find("dflash_cuda_backend_wait_for_stream") != std::string::npos,
+        "CUDA backend must expose an event wait from GGML compute stream to DFlash per-thread stream");
+    ok &= expect(context_h.find("fn_sync_backend_to_stream") != std::string::npos,
+        "DFlash capture state must cache the CUDA stream ordering helper");
+    ok &= expect(context_cpp.find("dflash_wait_for_gpu_capture_stream()") != std::string::npos,
+        "decode must use fine-grained CUDA stream ordering for graph-copied DFlash hidden tensors");
+    ok &= expect(context_cpp.find("if (dflash_capture && !dflash_wait_for_gpu_capture_stream())") != std::string::npos,
+        "decode must only fall back to full scheduler synchronization when CUDA stream ordering is unavailable");
     ok &= expect(graph_h.find("cparams.hidden_gpu_seqs[i] != other.cparams.hidden_gpu_seqs[i]") != std::string::npos,
         "graph reuse must invalidate when DFlash hidden GPU graph-copy destinations change");
     ok &= expect(graph_h.find("cparams.prefill_gpu_seqs[i] != other.cparams.prefill_gpu_seqs[i]") != std::string::npos,
