@@ -606,6 +606,52 @@ static hf_cache::hf_file find_best_mmproj(const hf_cache::hf_files & files,
     return best;
 }
 
+static hf_cache::hf_file find_best_dflash(const hf_cache::hf_files & files,
+                                          const std::string        & model) {
+    hf_cache::hf_file best;
+    int best_diff = 0;
+    bool found = false;
+
+    auto model_bits = extract_quant_bits(model);
+    auto model_parts = string_split<std::string>(model, '/');
+    auto model_dir = model_parts.end() - 1;
+
+    for (const auto & f : files) {
+        if (!string_ends_with(f.path, ".gguf")) {
+            continue;
+        }
+
+        std::string filename = f.path;
+        if (auto pos = filename.rfind('/'); pos != std::string::npos) {
+            filename = filename.substr(pos + 1);
+        }
+        if (filename.rfind("dflash-", 0) != 0 &&
+            filename.rfind("draft-dflash-", 0) != 0) {
+            continue;
+        }
+
+        auto dflash_parts = string_split<std::string>(f.path, '/');
+        auto dflash_dir = dflash_parts.end() - 1;
+
+        auto [_, dir] = std::mismatch(model_parts.begin(), model_dir,
+                                      dflash_parts.begin(), dflash_dir);
+        if (dir != dflash_dir) {
+            continue;
+        }
+
+        auto bits = extract_quant_bits(f.path);
+        auto diff = std::abs(bits - model_bits);
+
+        if (!found || diff < best_diff) {
+            best = f;
+            best_diff = diff;
+            found = true;
+        }
+    }
+
+    return best;
+}
+
 static bool gguf_filename_is_model(const std::string & filepath) {
     if (!string_ends_with(filepath, ".gguf")) {
         return false;
@@ -617,7 +663,9 @@ static bool gguf_filename_is_model(const std::string & filepath) {
     }
 
     return filename.find("mmproj")  == std::string::npos &&
-           filename.find("imatrix") == std::string::npos;
+           filename.find("imatrix") == std::string::npos &&
+           filename.rfind("dflash-", 0) != 0 &&
+           filename.rfind("draft-dflash-", 0) != 0;
 }
 
 static hf_cache::hf_file find_best_model(const hf_cache::hf_files & files,
@@ -673,11 +721,13 @@ struct hf_plan {
     hf_cache::hf_file primary;
     hf_cache::hf_files model_files;
     hf_cache::hf_file mmproj;
+    hf_cache::hf_file dflash;
 };
 
 static hf_plan get_hf_plan(const common_params_model  & model,
                            const common_download_opts & opts,
-                           bool download_mmproj) {
+                           bool download_mmproj,
+                           bool download_dflash) {
     hf_plan plan;
     hf_cache::hf_files all;
 
@@ -722,6 +772,9 @@ static hf_plan get_hf_plan(const common_params_model  & model,
     if (download_mmproj) {
         plan.mmproj = find_best_mmproj(all, primary.path);
     }
+    if (download_dflash) {
+        plan.dflash = find_best_dflash(all, primary.path);
+    }
 
     return plan;
 }
@@ -756,7 +809,8 @@ static std::vector<download_task> get_url_tasks(const common_params_model & mode
 
 common_download_model_result common_download_model(const common_params_model  & model,
                                                    const common_download_opts & opts,
-                                                   bool download_mmproj) {
+                                                   bool download_mmproj,
+                                                   bool download_dflash) {
     common_download_model_result result;
     std::vector<download_task> tasks;
     hf_plan hf;
@@ -764,12 +818,15 @@ common_download_model_result common_download_model(const common_params_model  & 
     bool is_hf = !model.hf_repo.empty();
 
     if (is_hf) {
-        hf = get_hf_plan(model, opts, download_mmproj);
+        hf = get_hf_plan(model, opts, download_mmproj, download_dflash);
         for (const auto & f : hf.model_files) {
             tasks.push_back({f.url, f.local_path});
         }
         if (!hf.mmproj.path.empty()) {
             tasks.push_back({hf.mmproj.url, hf.mmproj.local_path});
+        }
+        if (!hf.dflash.path.empty()) {
+            tasks.push_back({hf.dflash.url, hf.dflash.local_path});
         }
     } else if (!model.url.empty()) {
         tasks = get_url_tasks(model);
@@ -806,6 +863,9 @@ common_download_model_result common_download_model(const common_params_model  & 
 
         if (!hf.mmproj.path.empty()) {
             result.mmproj_path = hf_cache::finalize_file(hf.mmproj);
+        }
+        if (!hf.dflash.path.empty()) {
+            result.dflash_draft_path = hf_cache::finalize_file(hf.dflash);
         }
     } else {
         result.model_path = model.path;

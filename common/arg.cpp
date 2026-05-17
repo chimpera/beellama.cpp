@@ -333,11 +333,14 @@ static bool common_params_handle_remote_preset(common_params & params, llama_exa
 struct handle_model_result {
     bool found_mmproj = false;
     common_params_model mmproj;
+    bool found_dflash = false;
+    common_params_model dflash;
 };
 
 static handle_model_result common_params_handle_model(struct common_params_model & model,
                                                       const std::string          & bearer_token,
-                                                      bool                         offline) {
+                                                      bool                         offline,
+                                                      bool                         download_dflash = false) {
     handle_model_result result;
 
     if (!model.docker_repo.empty()) {
@@ -352,7 +355,7 @@ static handle_model_result common_params_handle_model(struct common_params_model
         common_download_opts opts;
         opts.bearer_token = bearer_token;
         opts.offline = offline;
-        auto download_result = common_download_model(model, opts, true);
+        auto download_result = common_download_model(model, opts, true, download_dflash);
 
         if (download_result.model_path.empty()) {
             LOG_ERR("error: failed to download model from Hugging Face\n");
@@ -365,6 +368,10 @@ static handle_model_result common_params_handle_model(struct common_params_model
         if (!download_result.mmproj_path.empty()) {
             result.found_mmproj = true;
             result.mmproj.path  = download_result.mmproj_path;
+        }
+        if (!download_result.dflash_draft_path.empty()) {
+            result.found_dflash = true;
+            result.dflash.path  = download_result.dflash_draft_path;
         }
     } else if (!model.url.empty()) {
         if (model.path.empty()) {
@@ -605,12 +612,30 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
 
     // handle model and download
     if (!skip_model_download) {
-        auto res = common_params_handle_model(params.model, params.hf_token, params.offline);
+        const bool dflash_draft_explicit =
+            !params.speculative.draft.mparams.path.empty() ||
+            !params.speculative.draft.mparams.url.empty() ||
+            !params.speculative.draft.mparams.hf_repo.empty() ||
+            !params.speculative.draft.mparams.hf_file.empty() ||
+            !params.speculative.draft.mparams.docker_repo.empty();
+        const bool find_dflash_draft =
+            params.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH && !dflash_draft_explicit;
+
+        auto res = common_params_handle_model(params.model, params.hf_token, params.offline, find_dflash_draft);
         if (params.no_mmproj) {
             params.mmproj = {};
         } else if (res.found_mmproj && params.mmproj.path.empty() && params.mmproj.url.empty()) {
             // optionally, handle mmproj model when -hf is specified
             params.mmproj = res.mmproj;
+        }
+        if (find_dflash_draft && res.found_dflash) {
+            params.speculative.draft.mparams.path = res.dflash.path;
+            std::string dflash_filename = params.speculative.draft.mparams.path;
+            if (auto pos = dflash_filename.find_last_of("/\\"); pos != std::string::npos) {
+                dflash_filename = dflash_filename.substr(pos + 1);
+            }
+            LOG_INF("dflash: selected sibling draft model %s\n",
+                    dflash_filename.c_str());
         }
         // only download mmproj if the current example is using it
         for (const auto & ex : mmproj_examples) {
