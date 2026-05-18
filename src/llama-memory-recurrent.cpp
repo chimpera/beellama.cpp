@@ -745,12 +745,68 @@ bool llama_memory_recurrent::resize(uint32_t new_mem_size) {
     ctxs_bufs = std::move(new_ctxs_bufs);
     cells.resize(new_mem_size);
     size = new_mem_size;
+
+    uint32_t used_new = 0;
+    for (auto & cell : cells) {
+        cell.tail = -1;
+
+        for (auto it = cell.seq_id.begin(); it != cell.seq_id.end();) {
+            if (*it < 0 || (uint32_t) *it >= size) {
+                LLAMA_LOG_WARN("%s: dropping seq_id %d after resize %u -> %u\n",
+                        __func__, *it, old_size, new_mem_size);
+                it = cell.seq_id.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        if (cell.seq_id.empty()) {
+            cell.pos  = -1;
+            cell.src  = -1;
+            cell.src0 = -1;
+            continue;
+        }
+
+        if (cell.src >= (int32_t) size) {
+            LLAMA_LOG_WARN("%s: clearing out-of-range src %d after resize %u -> %u\n",
+                    __func__, cell.src, old_size, new_mem_size);
+            cell.src = -1;
+        }
+        if (cell.src0 >= (int32_t) size) {
+            LLAMA_LOG_WARN("%s: clearing out-of-range src0 %d after resize %u -> %u\n",
+                    __func__, cell.src0, old_size, new_mem_size);
+            cell.src0 = -1;
+        }
+
+        used_new++;
+    }
+
+    for (uint32_t i = 0; i < size; ++i) {
+        for (llama_seq_id seq_id : cells[i].seq_id) {
+            cells[seq_id].tail = i;
+        }
+    }
+
+    used = used_new;
+    if (size == 0) {
+        head = 0;
+        n    = 0;
+        rs_z = -1;
+    } else {
+        head = std::min(head, size - 1);
+        n    = std::min(n, size);
+        if (rs_z >= (int32_t) size) {
+            rs_z = -1;
+        }
+    }
+
     invalidate_recurrent_copy_plan();
 
     const size_t memory_size_r = size_r_bytes();
     const size_t memory_size_s = size_s_bytes();
-    LLAMA_LOG_INFO("%s: resized %u -> %u cells, R: %7.2f MiB, S: %7.2f MiB\n", __func__,
+    LLAMA_LOG_INFO("%s: resized %u -> %u cells, used=%u, head=%u, n=%u, rs_z=%d, R: %7.2f MiB, S: %7.2f MiB\n", __func__,
             old_size, new_mem_size,
+            used, head, n, rs_z,
             (float)memory_size_r / (1024.0f * 1024.0f),
             (float)memory_size_s / (1024.0f * 1024.0f));
 
@@ -1579,5 +1635,21 @@ ggml_tensor * llama_memory_recurrent_context::get_s_l(int32_t il) const {
 }
 
 int32_t llama_memory_recurrent_context::s_copy(int i) const {
-    return  mem->cells[i + mem->head].src0;
+    const int32_t cell_idx = (int32_t) mem->head + i;
+    const int32_t fallback = get_rs_z() >= 0 ? get_rs_z() : 0;
+
+    if (cell_idx < 0 || (uint32_t) cell_idx >= mem->size) {
+        LLAMA_LOG_WARN("%s: source cell index out of range: i=%d head=%u size=%u, using zero state %d\n",
+                __func__, i, mem->head, mem->size, fallback);
+        return fallback;
+    }
+
+    const int32_t src = mem->cells[cell_idx].src0;
+    if (src < 0 || (uint32_t) src >= mem->size) {
+        LLAMA_LOG_WARN("%s: recurrent source row out of range: i=%d cell=%d src=%d size=%u, using zero state %d\n",
+                __func__, i, cell_idx, src, mem->size, fallback);
+        return fallback;
+    }
+
+    return src;
 }
