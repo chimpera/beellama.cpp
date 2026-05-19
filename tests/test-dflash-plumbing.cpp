@@ -558,6 +558,8 @@ int main(int argc, char ** argv) {
                  download_cpp.find("\"dflash-\"") != std::string::npos &&
                  download_cpp.find("\"draft-dflash-\"") != std::string::npos,
         "download code must discover dflash- and draft-dflash- sibling GGUFs");
+    ok &= expect(download_cpp.find("model_common != model_dir || dflash_common != dflash_dir") != std::string::npos,
+        "DFlash sibling discovery must require the full parent directory to match");
     ok &= expect(download_cpp.find("filename.rfind(\"dflash-\", 0) != 0") != std::string::npos &&
                  download_cpp.find("filename.rfind(\"draft-dflash-\", 0) != 0") != std::string::npos,
         "download code must exclude DFlash drafts from primary model selection");

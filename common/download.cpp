@@ -633,9 +633,9 @@ static hf_cache::hf_file find_best_dflash(const hf_cache::hf_files & files,
         auto dflash_parts = string_split<std::string>(f.path, '/');
         auto dflash_dir = dflash_parts.end() - 1;
 
-        auto [_, dir] = std::mismatch(model_parts.begin(), model_dir,
-                                      dflash_parts.begin(), dflash_dir);
-        if (dir != dflash_dir) {
+        auto [model_common, dflash_common] = std::mismatch(model_parts.begin(), model_dir,
+                                                           dflash_parts.begin(), dflash_dir);
+        if (model_common != model_dir || dflash_common != dflash_dir) {
             continue;
         }
 
