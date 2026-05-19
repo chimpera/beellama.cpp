@@ -28,6 +28,41 @@
 
 struct clip_logger_state g_logger_state = {clip_log_callback_default, NULL};
 
+static void clip_set_limit_image_tokens_for_non_causal_decode(
+        clip_hparams & hparams,
+        int            n_tokens_min,
+        int            n_tokens_max,
+        int            decoder_n_ubatch) {
+    if (decoder_n_ubatch <= 0) {
+        hparams.set_limit_image_tokens(n_tokens_min, n_tokens_max);
+        return;
+    }
+
+    int effective_min = hparams.custom_image_min_tokens > 0 ? hparams.custom_image_min_tokens : n_tokens_min;
+    int effective_max = hparams.custom_image_max_tokens > 0 ? hparams.custom_image_max_tokens : n_tokens_max;
+
+    if (effective_max <= decoder_n_ubatch) {
+        hparams.set_limit_image_tokens(n_tokens_min, n_tokens_max);
+        return;
+    }
+
+    LOG_WRN("%s: non-causal image decode requires image tokens <= decoder n_ubatch; limiting image_max_tokens from %d to %d\n",
+            __func__, effective_max, decoder_n_ubatch);
+    effective_max = decoder_n_ubatch;
+
+    if (effective_min > effective_max) {
+        LOG_WRN("%s: limiting image_min_tokens from %d to %d to keep non-causal image decode within decoder n_ubatch\n",
+                __func__, effective_min, effective_max);
+        effective_min = effective_max;
+    }
+
+    const int cur_merge = hparams.n_merge == 0 ? 1 : hparams.n_merge;
+    const int patch_area = hparams.patch_size * hparams.patch_size * cur_merge * cur_merge;
+    hparams.image_min_pixels = effective_min * patch_area;
+    hparams.image_max_pixels = effective_max * patch_area;
+    hparams.warmup_image_size = static_cast<int>(std::sqrt(hparams.image_max_pixels));
+}
+
 //#define CLIP_DEBUG_FUNCTIONS
 
 #ifdef CLIP_DEBUG_FUNCTIONS
@@ -1035,7 +1070,7 @@ struct clip_model_loader {
         }
     }
 
-    void load_hparams(clip_model & model, clip_modality modality) {
+    void load_hparams(clip_model & model, clip_modality modality, int decoder_n_ubatch) {
         auto & hparams = model.hparams;
         std::string log_ffn_op; // for logging
 
@@ -1338,7 +1373,7 @@ struct clip_model_loader {
                         hparams.image_resize_algo = RESIZE_ALGO_BILINEAR;
                         get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
                         // @ngxson : the model performs quite poor with small images, we need to bump minimum image tokens to 40 to avoid that
-                        hparams.set_limit_image_tokens(252, 280);
+                        clip_set_limit_image_tokens_for_non_causal_decode(hparams, 252, 280, decoder_n_ubatch);
                         hparams.set_warmup_n_tokens(256); // avoid OOM on warmup
                     } break;
 
@@ -2717,7 +2752,7 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
 
         if (loader.has_vision) {
             ctx_vision = new clip_ctx(ctx_params);
-            loader.load_hparams(ctx_vision->model, CLIP_MODALITY_VISION);
+            loader.load_hparams(ctx_vision->model, CLIP_MODALITY_VISION, ctx_params.decoder_n_ubatch);
             loader.load_tensors(*ctx_vision);
             if (ctx_params.warmup) {
                 loader.warmup(*ctx_vision);
@@ -2730,7 +2765,7 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
 
         if (loader.has_audio && !skip_audio) {
             ctx_audio = new clip_ctx(ctx_params);
-            loader.load_hparams(ctx_audio->model, CLIP_MODALITY_AUDIO);
+            loader.load_hparams(ctx_audio->model, CLIP_MODALITY_AUDIO, ctx_params.decoder_n_ubatch);
             loader.load_tensors(*ctx_audio);
             if (ctx_params.warmup) {
                 loader.warmup(*ctx_audio);

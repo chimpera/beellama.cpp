@@ -40,6 +40,7 @@ struct clip_context_params {
     bool warmup;
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
+    int decoder_n_ubatch;
 };
 
 struct clip_init_result {
