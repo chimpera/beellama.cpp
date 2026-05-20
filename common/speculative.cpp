@@ -328,8 +328,9 @@ struct common_speculative_state {
     // save/restore ring buffer state for checkpoint persistence.
     // allows hidden states captured during prefill to survive checkpoint restore.
     virtual size_t ring_state_size() const { return 0; }
-    virtual void ring_state_save(uint8_t * /*buf*/, size_t /*size*/) const {}
+    virtual bool ring_state_save(uint8_t * /*buf*/, size_t /*size*/) const { return false; }
     virtual bool ring_state_load(const uint8_t * /*buf*/, size_t /*size*/) { return false; }
+    virtual common_dflash_ring_stats dflash_ring_stats() const { return {}; }
 
     // identify which server slot (seq_id on both ctx_tgt and shared ctx_dft) this
     // state owns. Default 0 (single-slot). Non-DFlash impls ignore this.
@@ -1523,6 +1524,95 @@ static std::string common_dflash_layer_ids_to_string(const std::vector<int32_t> 
     return ss.str();
 }
 
+static const char * common_dflash_layer_attention_kind(const llama_model * model, int32_t il) {
+    const int32_t is_swa = llama_model_is_swa_layer(model, il);
+    if (is_swa < 0) {
+        return "UNK";
+    }
+    return is_swa ? "SWA" : "FULL";
+}
+
+static std::string common_dflash_layer_ids_with_attention_to_string(
+        const llama_model * model,
+        const std::vector<int32_t> & ids) {
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0) {
+            ss << ",";
+        }
+        ss << ids[i] << ":" << common_dflash_layer_attention_kind(model, ids[i]);
+    }
+    ss << "]";
+    return ss.str();
+}
+
+static std::string common_dflash_swa_pattern_to_string(const llama_model * model, int32_t n_layer, int32_t max_layers = 32) {
+    std::ostringstream ss;
+    ss << "[";
+    const int32_t n_show = std::min(n_layer, max_layers);
+    for (int32_t il = 0; il < n_show; ++il) {
+        if (il > 0) {
+            ss << ",";
+        }
+        ss << common_dflash_layer_attention_kind(model, il);
+    }
+    if (n_layer > n_show) {
+        ss << ",...";
+    }
+    ss << "]";
+    return ss.str();
+}
+
+static void common_dflash_capture_attention_counts(
+        const llama_model * model,
+        const std::vector<int32_t> & ids,
+        int & n_swa,
+        int & n_full,
+        int & n_unknown) {
+    n_swa = 0;
+    n_full = 0;
+    n_unknown = 0;
+    for (const int32_t il : ids) {
+        const int32_t is_swa = llama_model_is_swa_layer(model, il);
+        if (is_swa < 0) {
+            n_unknown++;
+        } else if (is_swa) {
+            n_swa++;
+        } else {
+            n_full++;
+        }
+    }
+}
+
+static std::string common_dflash_capture_neighborhood_to_string(
+        const llama_model * model,
+        const std::vector<int32_t> & ids,
+        int32_t n_layer,
+        int32_t radius = 2) {
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0) {
+            ss << ",";
+        }
+        const int32_t center = ids[i];
+        ss << center << ":{";
+        bool first = true;
+        for (int32_t il = std::max<int32_t>(0, center - radius);
+                il <= std::min<int32_t>(n_layer - 1, center + radius); ++il) {
+            if (!first) {
+                ss << ",";
+            }
+            first = false;
+            ss << il << ":" << common_dflash_layer_attention_kind(model, il);
+        }
+        ss << "}";
+    }
+    ss << "]";
+    return ss.str();
+}
+
 static bool common_dflash_layer_ids_unique(const std::vector<int32_t> & ids) {
     std::set<int32_t> seen;
     for (const int32_t id : ids) {
@@ -1604,11 +1694,6 @@ struct common_speculative_state_dflash : public common_speculative_state {
         cross_buf.clear();
         llama_dflash_kv_cache_reset(ctx_dft);
     }
-
-    // Adaptive draft length tracking
-    int n_low_accept = 0;
-    int n_draft_last = 0;
-    int adaptive_n_draft = -1; // -1 = use default
 
     // Validate that target hidden capture produced expected shapes.
     // Returns true if shapes match, false if mismatched (logs warning).
@@ -1814,6 +1899,52 @@ struct common_speculative_state_dflash : public common_speculative_state {
                 n_target_features,
                 target_n_layer,
                 cross_ctx);
+
+        if (profile_enabled(DFLASH_PROFILE_SUMMARY) || common_dflash_log_contract_verbose()) {
+            LOG_INF("dflash: contract detail: target_arch=%s draft_arch=%s "
+                    "target_n_swa=%d draft_n_swa=%d capture_layers=%s draft_swa_pattern=%s "
+                    "target_rope_full=%.1f target_rope_swa=%.1f target_rope_scale_full=%g target_rope_scale_swa=%g "
+                    "draft_rope_full=%.1f draft_rope_swa=%.1f draft_rope_scale_full=%g draft_rope_scale_swa=%g\n",
+                    llama_model_arch_name(model_tgt),
+                    llama_model_arch_name(model_dft_),
+                    llama_model_n_swa(model_tgt),
+                    llama_model_n_swa(model_dft_),
+                    common_dflash_layer_ids_with_attention_to_string(model_tgt, capture_layers).c_str(),
+                    common_dflash_swa_pattern_to_string(model_dft_, llama_model_n_layer(model_dft_)).c_str(),
+                    (double) llama_model_rope_freq_base_train(model_tgt),
+                    (double) llama_model_rope_freq_base_train_swa(model_tgt),
+                    (double) llama_model_rope_freq_scale_train(model_tgt),
+                    (double) llama_model_rope_freq_scale_train_swa(model_tgt),
+                    (double) llama_model_rope_freq_base_train(model_dft_),
+                    (double) llama_model_rope_freq_base_train_swa(model_dft_),
+                    (double) llama_model_rope_freq_scale_train(model_dft_),
+                    (double) llama_model_rope_freq_scale_train_swa(model_dft_));
+        }
+
+        {
+            int n_capture_swa = 0;
+            int n_capture_full = 0;
+            int n_capture_unknown = 0;
+            common_dflash_capture_attention_counts(
+                    model_tgt, capture_layers, n_capture_swa, n_capture_full, n_capture_unknown);
+
+            const int target_n_swa = llama_model_n_swa(model_tgt);
+            const int draft_n_swa  = llama_model_n_swa(model_dft_);
+            if (n_capture_swa > 0 && n_capture_full > 0) {
+                LOG_WRN("dflash: target capture layers mix SWA and FULL attention "
+                        "(swa=%d full=%d unknown=%d layers=%s neighborhoods=%s); "
+                        "long-context acceptance may be contract-limited\n",
+                        n_capture_swa, n_capture_full, n_capture_unknown,
+                        common_dflash_layer_ids_with_attention_to_string(model_tgt, capture_layers).c_str(),
+                        common_dflash_capture_neighborhood_to_string(
+                            model_tgt, capture_layers, target_n_layer).c_str());
+            }
+            if (target_n_swa > 0 && draft_n_swa > 0 && target_n_swa != draft_n_swa) {
+                LOG_WRN("dflash: target/draft SWA window mismatch target_n_swa=%d draft_n_swa=%d; "
+                        "treat this DFlash pairing as suspect for long chat until acceptance is verified\n",
+                        target_n_swa, draft_n_swa);
+            }
+        }
 
         {
             const llama_vocab * vocab_tgt = llama_model_get_vocab(model_tgt);
@@ -2167,42 +2298,67 @@ struct common_speculative_state_dflash : public common_speculative_state {
     // Format: [ring_write_pos:i32][ring_filled:i32][committed_len:i32]
     //         [n_target_layers:i32][n_embd:i32][n_entries:i32]
     //         [layer_0 data: n_entries * n_embd * f32] ...
+    // If n_target_layers is negative, data is a compact chronological GPU
+    // snapshot of the last n_entries tokens, normalized to ring slots
+    // [0,n_entries). This keeps checkpoint restores useful when GPU-only
+    // ring writes have made ring_buf stale.
 
     size_t ring_state_size() const override {
-        if (!cpu_ring_valid) {
+        if (!cpu_ring_valid && !gpu_ring_handle) {
             return 0;
         }
 
-        int n_entries = std::min(ring_filled, RING_SIZE);
+        int n_entries = cpu_ring_valid
+            ? std::min(ring_filled, RING_SIZE)
+            : std::min(ring_filled, cross_ctx);
         return 6 * sizeof(int32_t) +
                (size_t)n_entries * n_embd * sizeof(float) * n_target_layers;
     }
 
-    void ring_state_save(uint8_t * buf, size_t size) const override {
-        if (!cpu_ring_valid) {
-            return;
+    bool ring_state_save(uint8_t * buf, size_t size) const override {
+        if (!cpu_ring_valid && !gpu_ring_handle) {
+            return false;
         }
 
-        int n_entries = std::min(ring_filled, RING_SIZE);
+        const bool compact_gpu_snapshot = !cpu_ring_valid && gpu_ring_handle;
+        int n_entries = compact_gpu_snapshot
+            ? std::min(ring_filled, cross_ctx)
+            : std::min(ring_filled, RING_SIZE);
         size_t expected = 6 * sizeof(int32_t) +
                           (size_t)n_entries * n_embd * sizeof(float) * n_target_layers;
-        if (size < expected) return;
+        if (size < expected) return false;
 
         int32_t * hdr = (int32_t *)buf;
-        hdr[0] = ring_write_pos;
-        hdr[1] = ring_filled;
+        hdr[0] = compact_gpu_snapshot ? (n_entries % RING_SIZE) : ring_write_pos;
+        hdr[1] = compact_gpu_snapshot ? n_entries : ring_filled;
         hdr[2] = committed_len;
-        hdr[3] = n_target_layers;
+        hdr[3] = compact_gpu_snapshot ? -n_target_layers : n_target_layers;
         hdr[4] = n_embd;
         hdr[5] = n_entries;
 
         uint8_t * dst = buf + 6 * sizeof(int32_t);
         size_t layer_bytes = (size_t)n_entries * n_embd * sizeof(float);
 
+        if (compact_gpu_snapshot) {
+            const int gpu_write_pos = cross_ctx > 0 ? ring_write_pos % cross_ctx : 0;
+            const bool ok = llama_dflash_cross_ring_gpu_snapshot(gpu_ring_handle,
+                    gpu_write_pos, ring_filled, cross_ctx,
+                    (float *) dst, n_entries, n_target_layers, n_embd);
+            if (!ok) {
+                LOG_WRN("dflash: failed to snapshot GPU cross ring for checkpoint\n");
+            } else if (profile_enabled(DFLASH_PROFILE_PREFILL | DFLASH_PROFILE_SUMMARY)) {
+                LOG_INF("dflash checkpoint: GPU ring snapshot entries=%d committed=%d cross_ctx=%d\n",
+                        n_entries, committed_len, cross_ctx);
+            }
+            return ok;
+        }
+
         for (int l = 0; l < n_target_layers; ++l) {
             memcpy(dst, ring_buf[l].data(), layer_bytes);
             dst += layer_bytes;
         }
+
+        return true;
     }
 
     bool ring_state_load(const uint8_t * buf, size_t size) override {
@@ -2212,9 +2368,11 @@ struct common_speculative_state_dflash : public common_speculative_state {
         int saved_write_pos = hdr[0];
         int saved_filled    = hdr[1];
         int saved_committed = hdr[2];
-        int saved_layers    = hdr[3];
+        int saved_layers_raw = hdr[3];
         int saved_embd      = hdr[4];
         int saved_entries    = hdr[5];
+        const bool compact_gpu_snapshot = saved_layers_raw < 0;
+        int saved_layers = compact_gpu_snapshot ? -saved_layers_raw : saved_layers_raw;
 
         if (saved_layers != n_target_layers || saved_embd != n_embd) {
             LOG_WRN("dflash: ring state mismatch: layers %d/%d, embd %d/%d\n",
@@ -2226,8 +2384,8 @@ struct common_speculative_state_dflash : public common_speculative_state {
             saved_filled < 0 || saved_filled > RING_SIZE ||
             saved_entries < 0 || saved_entries != saved_filled ||
             saved_committed < saved_filled) {
-            LOG_WRN("dflash: ring state corrupt: write_pos=%d, filled=%d, committed=%d, entries=%d\n",
-                    saved_write_pos, saved_filled, saved_committed, saved_entries);
+            LOG_WRN("dflash: ring state corrupt: write_pos=%d, filled=%d, committed=%d, entries=%d compact=%d\n",
+                    saved_write_pos, saved_filled, saved_committed, saved_entries, compact_gpu_snapshot ? 1 : 0);
             return false;
         }
 
@@ -2238,8 +2396,11 @@ struct common_speculative_state_dflash : public common_speculative_state {
         ring_filled = saved_filled;
         committed_len = saved_committed;
 
-        LOG_WRN("DFLASH_DBG ring_state_load: write_pos=%d filled=%d committed=%d entries=%d gpu=%d\n",
-            saved_write_pos, saved_filled, saved_committed, saved_entries, gpu_ring_handle ? 1 : 0);
+        if (profile_enabled(DFLASH_PROFILE_PREFILL | DFLASH_PROFILE_COPY)) {
+            LOG_INF("dflash checkpoint: ring restore write_pos=%d filled=%d committed=%d entries=%d compact=%d gpu=%d\n",
+                saved_write_pos, saved_filled, saved_committed, saved_entries,
+                compact_gpu_snapshot ? 1 : 0, gpu_ring_handle ? 1 : 0);
+        }
 
         const uint8_t * src = buf + 6 * sizeof(int32_t);
         for (int l = 0; l < n_target_layers; ++l) {
@@ -2277,6 +2438,16 @@ struct common_speculative_state_dflash : public common_speculative_state {
         return true;
     }
 
+    common_dflash_ring_stats dflash_ring_stats() const override {
+        common_dflash_ring_stats stats;
+        stats.ring_write_pos = ring_write_pos;
+        stats.ring_filled    = ring_filled;
+        stats.committed_len  = committed_len;
+        stats.cross_ctx      = cross_ctx;
+        stats.cross_len      = std::min(ring_filled, cross_ctx > 0 ? cross_ctx : ring_filled);
+        return stats;
+    }
+
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
@@ -2285,8 +2456,7 @@ struct common_speculative_state_dflash : public common_speculative_state {
             std::vector<float> * draft_log_probs = nullptr) override {
         GGML_UNUSED(prompt_tgt);
 
-        const int n_draft_base = adaptive_n_draft > 0 ? adaptive_n_draft : (block_size - 1);
-        const int n_draft = std::min(n_draft_base, params.n_max);
+        const int n_draft = std::min(block_size - 1, params.n_max);
         if (committed_len == 0) {
             return;
         }
@@ -2362,8 +2532,6 @@ struct common_speculative_state_dflash : public common_speculative_state {
 
         const int64_t t4 = ggml_time_us();
 
-        n_draft_last = (int) result.size();
-
         if (profile_enabled(DFLASH_PROFILE_SUMMARY)) {
             const llama_perf_context_data perf_dft = llama_perf_context(ctx_dft);
             LOG_INF("dflash profile: draft ctx=%d cross_len=%d n_draft=%d produced=%d "
@@ -2379,24 +2547,7 @@ struct common_speculative_state_dflash : public common_speculative_state {
     }
 
     void accept(uint16_t n_accepted) override {
-        if (n_draft_last > 0) {
-            float f_acc = (float) n_accepted / (float) n_draft_last;
-            if (f_acc < 0.3f) {
-                n_low_accept++;
-                if (n_low_accept >= 3) {
-                    int base = adaptive_n_draft > 0 ? adaptive_n_draft : (block_size - 1);
-                    adaptive_n_draft = std::max(1, base / 2);
-                    LOG_DBG("dflash: low acceptance streak (%d) — reducing draft to %d\n",
-                            n_low_accept, adaptive_n_draft);
-                    n_low_accept = 0;
-                }
-            } else {
-                n_low_accept = 0;
-                if (f_acc > 0.6f && adaptive_n_draft > 0) {
-                    adaptive_n_draft = std::min(block_size - 1, adaptive_n_draft + 1);
-                }
-            }
-        }
+        GGML_UNUSED(n_accepted);
     }
 
     void draft_tree(
@@ -3551,10 +3702,8 @@ void common_speculative_draft_batch(
             }
         }
 
-        // update stats + adaptive draft tracking
+        // update stats
         rs.impl->n_call_draft++;
-        auto * dfl = static_cast<common_speculative_state_dflash *>(rs.impl);
-        dfl->n_draft_last = (int) result.size();
         if (!result.empty()) {
             rs.impl->n_gen_drafts++;
             rs.impl->n_gen_tokens += result.size();
@@ -3682,16 +3831,21 @@ size_t common_speculative_ring_state_size(const common_speculative * spec) {
     return total;
 }
 
-void common_speculative_ring_state_save(const common_speculative * spec, uint8_t * buf, size_t size) {
-    if (spec == nullptr) return;
+bool common_speculative_ring_state_save(const common_speculative * spec, uint8_t * buf, size_t size) {
+    if (spec == nullptr) return false;
+    bool saved_any = false;
     for (auto & impl : spec->impls) {
         size_t impl_size = impl->ring_state_size();
         if (impl_size > 0 && impl_size <= size) {
-            impl->ring_state_save(buf, impl_size);
+            if (!impl->ring_state_save(buf, impl_size)) {
+                return false;
+            }
+            saved_any = true;
             buf += impl_size;
             size -= impl_size;
         }
     }
+    return saved_any;
 }
 
 bool common_speculative_ring_state_load(common_speculative * spec, const uint8_t * buf, size_t size) {
@@ -3702,6 +3856,19 @@ bool common_speculative_ring_state_load(common_speculative * spec, const uint8_t
         }
     }
     return false;
+}
+
+common_dflash_ring_stats common_speculative_dflash_ring_stats(const common_speculative * spec) {
+    if (spec == nullptr) {
+        return {};
+    }
+    for (const auto & impl : spec->impls) {
+        const common_dflash_ring_stats stats = impl->dflash_ring_stats();
+        if (stats.cross_ctx > 0 || stats.committed_len > 0 || stats.ring_filled > 0) {
+            return stats;
+        }
+    }
+    return {};
 }
 
 int32_t common_speculative_n_max(const common_speculative * spec, const common_params_speculative & params) {

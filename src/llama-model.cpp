@@ -9348,6 +9348,18 @@ int32_t llama_model_n_swa(const llama_model * model) {
     return model->hparams.n_swa;
 }
 
+const char * llama_model_arch_name(const llama_model * model) {
+    return model ? llm_arch_name(model->arch) : "unknown";
+}
+
+int32_t llama_model_is_swa_layer(const llama_model * model, int32_t il) {
+    if (!model || il < 0 || il >= (int32_t) model->hparams.n_layer) {
+        return -1;
+    }
+
+    return model->hparams.is_swa((uint32_t) il) ? 1 : 0;
+}
+
 uint32_t llama_model_n_cls_out(const struct llama_model * model) {
     return model->hparams.n_cls_out;
 }
@@ -9537,6 +9549,18 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
 
 float llama_model_rope_freq_scale_train(const llama_model * model) {
     return model->hparams.rope_freq_scale_train;
+}
+
+float llama_model_rope_freq_base_train(const llama_model * model) {
+    return model->hparams.rope_freq_base_train;
+}
+
+float llama_model_rope_freq_base_train_swa(const llama_model * model) {
+    return model->hparams.rope_freq_base_train_swa;
+}
+
+float llama_model_rope_freq_scale_train_swa(const llama_model * model) {
+    return model->hparams.rope_freq_scale_train_swa;
 }
 
 int32_t llama_model_meta_val_str(const llama_model * model, const char * key, char * buf, size_t buf_size) {

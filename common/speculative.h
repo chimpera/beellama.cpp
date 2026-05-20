@@ -14,6 +14,14 @@ struct common_dflash_ring_write {
     int src_token_offset;
 };
 
+struct common_dflash_ring_stats {
+    int ring_write_pos = 0;
+    int ring_filled    = 0;
+    int committed_len  = 0;
+    int cross_ctx      = 0;
+    int cross_len      = 0;
+};
+
 // Describes which portion of a prefill sub-batch should be captured into
 // the DFlash cross ring.  When should_flush is true, src_offset and n_tokens
 // specify the contiguous span within the capture buffer to write.
@@ -140,8 +148,9 @@ void common_speculative_note_prefill_suffix_scheduled(common_speculative * spec)
 // the ring contains target hidden states needed by the DFlash drafter's
 // cross-attention. Without this, checkpoint-restored prefills lose context.
 size_t common_speculative_ring_state_size(const common_speculative * spec);
-void   common_speculative_ring_state_save(const common_speculative * spec, uint8_t * buf, size_t size);
+bool   common_speculative_ring_state_save(const common_speculative * spec, uint8_t * buf, size_t size);
 bool   common_speculative_ring_state_load(common_speculative * spec, const uint8_t * buf, size_t size);
+common_dflash_ring_stats common_speculative_dflash_ring_stats(const common_speculative * spec);
 
 // test helper: returns true when prefill capture is complete (captured >= requested)
 bool common_dflash_prefill_capture_complete_for_test(int captured, int requested);

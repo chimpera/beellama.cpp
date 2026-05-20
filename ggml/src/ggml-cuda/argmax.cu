@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <cinttypes>
+#include <cstdlib>
 #include <cstdint>
+#include <cstring>
 
 #include "argmax.cuh"
 #include "common.cuh"
@@ -13,6 +16,31 @@
 #        endif
 #    endif
 #endif
+
+static bool ggml_cuda_dflash_argmax_profile_enabled() {
+    static const bool enabled = [] {
+        const char * env = getenv("GGML_DFLASH_ARGMAX_PROFILE");
+        return env && env[0] != '\0' && strcmp(env, "0") != 0;
+    }();
+    return enabled;
+}
+
+static int ggml_cuda_dflash_cub_topk_mode() {
+    static const int mode = [] {
+        const char * env = getenv("GGML_CUDA_DFLASH_CUB_TOP_K");
+        if (!env || env[0] == '\0' || strcmp(env, "auto") == 0) {
+            return -1;
+        }
+        if (strcmp(env, "0") == 0 || strcmp(env, "off") == 0 || strcmp(env, "false") == 0) {
+            return 0;
+        }
+        if (strcmp(env, "1") == 0 || strcmp(env, "on") == 0 || strcmp(env, "true") == 0) {
+            return 1;
+        }
+        return -1;
+    }();
+    return mode;
+}
 
 // philox-style counter-based PRNG: fast, stateless, deterministic per (seed, counter)
 static __device__ __forceinline__ uint32_t philox_hash(uint64_t seed, uint64_t counter) {
@@ -496,9 +524,25 @@ void ggml_cuda_argmax(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_pool & pool = ctx.pool();
 
 #ifdef GGML_CUDA_DFLASH_CUB_TOP_K_AVAILABLE
-    if (K > 1 && !output_logprob && seed == 0) {
+    const int cub_mode = ggml_cuda_dflash_cub_topk_mode();
+    const bool use_cub_topk =
+        K > 1 && !output_logprob && seed == 0 &&
+        (K > 32 || cub_mode == 1 || (cub_mode < 0 && nrows > 32));
+    if (ggml_cuda_dflash_argmax_profile_enabled() && K > 1) {
+        GGML_LOG_INFO("%s: dflash argmax profile path=%s K=%d nrows=%" PRId64
+                " vocab=%" PRId64 " temp=%.3f seed=%" PRIu64 " output_logprob=%d cub_mode=%d\n",
+                __func__, use_cub_topk ? "cub" : "custom",
+                K, nrows, ne00, (double) temp, seed, output_logprob ? 1 : 0, cub_mode);
+    }
+    if (use_cub_topk) {
         topk_raw_cub(pool, src0_d, dst_d, ne00, nrows, K, stream);
         return;
+    }
+#else
+    if (ggml_cuda_dflash_argmax_profile_enabled() && K > 1) {
+        GGML_LOG_INFO("%s: dflash argmax profile path=custom K=%d nrows=%" PRId64
+                " vocab=%" PRId64 " temp=%.3f seed=%" PRIu64 " output_logprob=%d cub_mode=unavailable\n",
+                __func__, K, nrows, ne00, (double) temp, seed, output_logprob ? 1 : 0);
     }
 #endif
 
@@ -510,6 +554,7 @@ void ggml_cuda_argmax(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     if (K == 1) {
         argmax_f32<<<blocks_num, blocks_dim, 0, stream>>>(src0_d, dst_d, ne00, nrows, inv_temp, seed, output_logprob);
     } else {
+        GGML_ASSERT(K <= 32);
         // Shared memory: K * n_warps floats + K * n_warps ints + 2 * n_warps floats (softmax)
         const int n_warps = (int)(num_threads / WARP_SIZE);
         const size_t smem_size = K * n_warps * (sizeof(float) + sizeof(int32_t)) + 2 * n_warps * sizeof(float);

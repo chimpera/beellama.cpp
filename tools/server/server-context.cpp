@@ -20,6 +20,7 @@
 #include "src/llama-memory.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cinttypes>
 #include <cfloat>
@@ -46,6 +47,14 @@ using json = nlohmann::ordered_json;
 
 static bool dflash_server_profile_enabled(uint32_t flags) {
     return dflash_profile_enabled(flags);
+}
+
+static bool dflash_verify_padding_enabled() {
+    static const bool enabled = [] {
+        const char * env = getenv("GGML_DFLASH_VERIFY_PAD");
+        return env && env[0] != '\0' && strcmp(env, "0") != 0;
+    }();
+    return enabled;
 }
 
 static bool server_tail_pos_is_in_code_fence(
@@ -649,6 +658,12 @@ struct server_slot : server_adaptive_dm_state {
     // Speculative decoding stats
     int32_t n_draft_total = 0;      // Total draft tokens generated
     int32_t n_draft_accepted = 0;   // Draft tokens actually accepted
+    int64_t dflash_cycle_count = 0;
+    int64_t dflash_requested_total = 0;
+    int64_t dflash_produced_total = 0;
+    int64_t dflash_accepted_total = 0;
+    std::array<int64_t, 5> dflash_accept_hist = {};
+    std::array<std::array<int64_t, 5>, 5> dflash_accept_hist_by_ctx = {};
 
     // Hybrid model: recurrent state backup for speculative decoding
     bool has_draft_backup = false;
@@ -705,6 +720,14 @@ struct server_slot : server_adaptive_dm_state {
         // based on prompt continuity.
         n_draft_total = 0;
         n_draft_accepted = 0;
+        dflash_cycle_count = 0;
+        dflash_requested_total = 0;
+        dflash_produced_total = 0;
+        dflash_accepted_total = 0;
+        dflash_accept_hist.fill(0);
+        for (auto & bucket : dflash_accept_hist_by_ctx) {
+            bucket.fill(0);
+        }
         has_draft_backup = false;
         has_recurrent_only_backup = false;
         seq_id_backup = -1;
@@ -845,7 +868,7 @@ struct server_slot : server_adaptive_dm_state {
 
         const int base_n_max = common_speculative_n_max(spec.get(), task->params.speculative);
         const int probe_n_max = server_adaptive_dm_probe_n_max(base_n_max, dm_probe_fraction);
-        int n_draft_max = (adaptive_n_max >= 0) ? adaptive_n_max : base_n_max;
+        int n_draft_max = (dm_adaptive && adaptive_n_max >= 0) ? adaptive_n_max : base_n_max;
 
         if (dm_adaptive && dm_controller == COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT) {
             if (adaptive_n_max < 0) {
@@ -910,7 +933,7 @@ struct server_slot : server_adaptive_dm_state {
                 adaptive_n_max = probe_n_max;
             }
             n_draft_max = probe_n_max;
-        } else if (adaptive_n_max == 0) {
+        } else if (dm_adaptive && adaptive_n_max == 0) {
             // off state: probe periodically to check if fringe has recovered
             const bool probe_now = adaptive_probe_counter + 1 >= dm_probe_interval;
             if (!probe_now) {
@@ -1107,6 +1130,43 @@ struct server_slot : server_adaptive_dm_state {
         return stop_pos;
     }
 
+    static int dflash_accept_bin(int n_accepted) {
+        if (n_accepted <= 0) {
+            return 0;
+        }
+        if (n_accepted <= 3) {
+            return n_accepted;
+        }
+        return 4;
+    }
+
+    static int dflash_context_bucket(llama_pos pos) {
+        if (pos < 1000) {
+            return 0;
+        }
+        if (pos < 2000) {
+            return 1;
+        }
+        if (pos < 4000) {
+            return 2;
+        }
+        if (pos < 8000) {
+            return 3;
+        }
+        return 4;
+    }
+
+    void note_dflash_cycle(int requested, int produced, int accepted, llama_pos pos) {
+        dflash_cycle_count++;
+        dflash_requested_total += std::max(0, requested);
+        dflash_produced_total += std::max(0, produced);
+        dflash_accepted_total += std::max(0, accepted);
+        const int accept_bin = dflash_accept_bin(accepted);
+        const int ctx_bucket = dflash_context_bucket(pos);
+        dflash_accept_hist[(size_t) accept_bin]++;
+        dflash_accept_hist_by_ctx[(size_t) ctx_bucket][(size_t) accept_bin]++;
+    }
+
     void print_timings() const {
         const double t_prompt        =       t_prompt_processing / n_prompt_tokens_processed;
         const double n_prompt_second = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
@@ -1131,6 +1191,42 @@ struct server_slot : server_adaptive_dm_state {
             );
             if (adaptive_n_max >= 0) {
                 SLT_CNT(*this, "adaptive dm: fringe=%.2f n_max=%d\n", rolling_fringe, adaptive_n_max);
+            }
+            if (dflash_cycle_count > 0 && dflash_server_profile_enabled(DFLASH_PROFILE_SUMMARY)) {
+                SLT_CNT(*this,
+                        "dflash acceptance histogram: cycles=%" PRId64
+                        " requested=%" PRId64 " produced=%" PRId64 " accepted=%" PRId64
+                        " bins[0,1,2,3,4+]=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
+                        dflash_cycle_count,
+                        dflash_requested_total,
+                        dflash_produced_total,
+                        dflash_accepted_total,
+                        dflash_accept_hist[0],
+                        dflash_accept_hist[1],
+                        dflash_accept_hist[2],
+                        dflash_accept_hist[3],
+                        dflash_accept_hist[4]);
+                SLT_CNT(*this,
+                        "dflash acceptance by ctx: <1k=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] "
+                        "1-2k=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] "
+                        "2-4k=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] "
+                        "4-8k=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] "
+                        "8k+=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
+                        dflash_accept_hist_by_ctx[0][0], dflash_accept_hist_by_ctx[0][1],
+                        dflash_accept_hist_by_ctx[0][2], dflash_accept_hist_by_ctx[0][3],
+                        dflash_accept_hist_by_ctx[0][4],
+                        dflash_accept_hist_by_ctx[1][0], dflash_accept_hist_by_ctx[1][1],
+                        dflash_accept_hist_by_ctx[1][2], dflash_accept_hist_by_ctx[1][3],
+                        dflash_accept_hist_by_ctx[1][4],
+                        dflash_accept_hist_by_ctx[2][0], dflash_accept_hist_by_ctx[2][1],
+                        dflash_accept_hist_by_ctx[2][2], dflash_accept_hist_by_ctx[2][3],
+                        dflash_accept_hist_by_ctx[2][4],
+                        dflash_accept_hist_by_ctx[3][0], dflash_accept_hist_by_ctx[3][1],
+                        dflash_accept_hist_by_ctx[3][2], dflash_accept_hist_by_ctx[3][3],
+                        dflash_accept_hist_by_ctx[3][4],
+                        dflash_accept_hist_by_ctx[4][0], dflash_accept_hist_by_ctx[4][1],
+                        dflash_accept_hist_by_ctx[4][2], dflash_accept_hist_by_ctx[4][3],
+                        dflash_accept_hist_by_ctx[4][4]);
             }
             const int32_t n_reject_tested = n_reject_exact + n_reject_prob_accept + n_reject_reject + n_reject_no_prob;
             if (n_reject_tested > 0) {
@@ -2475,6 +2571,13 @@ private:
             }
 
             SLT_INF(slot, "sampler chain: %s\n", common_sampler_print(slot.smpl.get()).c_str());
+            std::string sampler_names;
+            for (const auto sampler : task.params.sampling.samplers) {
+                if (!sampler_names.empty()) {
+                    sampler_names += ";";
+                }
+                sampler_names += common_sampler_type_to_str(sampler);
+            }
             if (task.params.reasoning_loop_guard.mode == COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE &&
                     task.params.chat_parser_params.reasoning_format != COMMON_REASONING_FORMAT_NONE &&
                     common_sampler_reasoning_forced_token_count(slot.smpl.get()) == 0) {
@@ -2500,6 +2603,7 @@ private:
                     (double) task.params.speculative.draft.p_min);
             SLT_INF(slot,
                     "request sampling: n_predict=%d ignore_eos=%d stop=%zu reasoning_budget=%d "
+                    "temp=%.3f dynatemp_range=%.3f dynatemp_exponent=%.3f top_k=%d top_p=%.3f min_p=%.3f typ_p=%.3f top_n_sigma=%.3f mirostat=%d samplers=%s "
                     "reasoning_loop_guard=%d loop_min=%d loop_window=%d loop_period=%d loop_coverage=%d loop_interval=%d loop_interventions=%d "
                     "repeat_penalty=%.3f "
                     "presence_penalty=%.3f frequency_penalty=%.3f dry_multiplier=%.3f dry_allowed_length=%d "
@@ -2508,6 +2612,16 @@ private:
                     task.params.sampling.ignore_eos ? 1 : 0,
                     task.params.antiprompt.size(),
                     task.params.sampling.reasoning_budget_tokens,
+                    (double) task.params.sampling.temp,
+                    (double) task.params.sampling.dynatemp_range,
+                    (double) task.params.sampling.dynatemp_exponent,
+                    task.params.sampling.top_k,
+                    (double) task.params.sampling.top_p,
+                    (double) task.params.sampling.min_p,
+                    (double) task.params.sampling.typ_p,
+                    (double) task.params.sampling.top_n_sigma,
+                    task.params.sampling.mirostat,
+                    sampler_names.c_str(),
                     (int) task.params.reasoning_loop_guard.mode,
                     task.params.reasoning_loop_guard.min_reasoning_tokens,
                     task.params.reasoning_loop_guard.window_tokens,
@@ -3599,6 +3713,12 @@ private:
         int n_slots_drafted = 0;
         server_slot * profit_baseline_slot = nullptr;
         int n_profit_baseline_slots = 0;
+        server_slot * dflash_cycle_slot = nullptr;
+        int dflash_cycle_n_draft = 0;
+        int dflash_cycle_n_accept = 0;
+        bool dflash_cycle_reduced_verify = false;
+        int dflash_cycle_reduced_top_k = 0;
+        llama_pos dflash_cycle_pos = -1;
 
         // DFlash: narrow the shared drafter graph when fewer than max slots are
         // actively drafting. When only 1 slot drafts, the graph builder uses
@@ -3869,6 +3989,7 @@ private:
                         slot.task ? slot.task->params.sampling : params_base.sampling;
                     if (params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH &&
                             params_base.speculative.branch_budget == 0 &&
+                            dflash_verify_padding_enabled() &&
                             !use_rejection_sampling &&
                             draft.size() < (size_t) active_verify_draft_max &&
                             common_sampler_supports_reduced(slot.smpl.get()) &&
@@ -3885,7 +4006,7 @@ private:
                             common_batch_add(batch, slot.sampled, pad_pos0 + i, { slot.id }, true);
                         }
                         if (pad_count > 0) {
-                            SLT_DBG(slot, "padded DFlash verifier batch by %d tokens to active graph shape\n", pad_count);
+                            SLT_DBG(slot, "padded DFlash verifier batch by %d tokens to active graph shape (GGML_DFLASH_VERIFY_PAD=1)\n", pad_count);
                         }
                     }
                     slot.spec_draft = std::move(draft);
@@ -4196,8 +4317,22 @@ private:
                                             n_past = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
 
                                             // restore DFlash ring buffer from checkpoint
-                                            if (slot.can_speculate() && !it->ring_data.empty()) {
-                                                common_speculative_ring_state_load(slot.spec.get(), it->ring_data.data(), it->ring_data.size());
+                                            const bool dflash_checkpoint_slot =
+                                                slot.can_speculate() &&
+                                                params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH;
+                                            bool dflash_ring_restored = false;
+                                            if (dflash_checkpoint_slot && !it->ring_data.empty()) {
+                                                dflash_ring_restored = common_speculative_ring_state_load(
+                                                        slot.spec.get(), it->ring_data.data(), it->ring_data.size());
+                                            }
+                                            if (dflash_checkpoint_slot &&
+                                                    dflash_server_profile_enabled(DFLASH_PROFILE_SUMMARY | DFLASH_PROFILE_PREFILL)) {
+                                                SLT_INF(slot,
+                                                        "dflash checkpoint: restore pos=[%d,%d] n_tokens=%" PRId64
+                                                        " ring_state_bytes=%zu ring_restored=%d suffix_recapture_required=%d\n",
+                                                        it->pos_min, it->pos_max, it->n_tokens, it->ring_data.size(),
+                                                        dflash_ring_restored ? 1 : 0,
+                                                        dflash_ring_restored ? 0 : 1);
                                             }
 
                                             SLT_WRN(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) checkpoint_size / 1024 / 1024);
@@ -4456,12 +4591,29 @@ private:
                                                      LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
                         // save DFlash ring buffer alongside the recurrent state checkpoint
-                        if (slot.can_speculate()) {
-                            size_t ring_size = common_speculative_ring_state_size(slot.spec.get());
+                        const bool dflash_checkpoint_slot =
+                            slot.can_speculate() &&
+                            params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH;
+                        size_t ring_size = 0;
+                        bool ring_saved = false;
+                        if (dflash_checkpoint_slot) {
+                            ring_size = common_speculative_ring_state_size(slot.spec.get());
                             if (ring_size > 0) {
                                 cur.ring_data.resize(ring_size);
-                                common_speculative_ring_state_save(slot.spec.get(), cur.ring_data.data(), ring_size);
+                                ring_saved = common_speculative_ring_state_save(
+                                        slot.spec.get(), cur.ring_data.data(), ring_size);
+                                if (!ring_saved) {
+                                    cur.ring_data.clear();
+                                    ring_size = 0;
+                                }
                             }
+                        }
+                        if (dflash_checkpoint_slot &&
+                                dflash_server_profile_enabled(DFLASH_PROFILE_SUMMARY | DFLASH_PROFILE_PREFILL)) {
+                            SLT_INF(slot,
+                                    "dflash checkpoint: create pos=[%d,%d] n_tokens=%" PRId64
+                                    " ring_state_bytes=%zu ring_saved=%d\n",
+                                    cur.pos_min, cur.pos_max, cur.n_tokens, ring_size, ring_saved ? 1 : 0);
                         }
 
                         SLT_WRN(slot,
@@ -5253,6 +5405,15 @@ private:
 
                 // update how many tokens out of those tested were accepted
                 slot.n_draft_accepted += n_accepted_draft;
+                if (params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH) {
+                    slot.note_dflash_cycle((int) n_draft, (int) n_draft, n_accepted_draft, slot.n_pos_before_draft);
+                    dflash_cycle_slot = &slot;
+                    dflash_cycle_n_draft = (int) n_draft;
+                    dflash_cycle_n_accept = n_accepted_draft;
+                    dflash_cycle_reduced_verify = dflash_reduced_verify_ready && dflash_verify_plan.enabled;
+                    dflash_cycle_reduced_top_k = dflash_reduced_verify_top_k;
+                    dflash_cycle_pos = slot.n_pos_before_draft;
+                }
 
                 // adaptive dm: collect shared telemetry, then let the selected controller own n_max.
                 if (slot.dm_adaptive && !is_draft_tree) {
@@ -5660,6 +5821,39 @@ private:
         if (n_slots_drafted > 0) {
             const int64_t t_cycle_total = ggml_time_us() - t_cycle_start;
             const int64_t t_other = t_cycle_total - t_draft_total - t_verify_total - t_accept_total;
+            if (profile_dflash_cycle && n_slots_drafted == 1 && dflash_cycle_slot &&
+                    params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH) {
+                const common_dflash_ring_stats ring_stats =
+                    common_speculative_dflash_ring_stats(dflash_cycle_slot->spec.get());
+                const int base_n_max = dflash_cycle_slot->task
+                    ? common_speculative_n_max(dflash_cycle_slot->spec.get(), dflash_cycle_slot->task->params.speculative)
+                    : 0;
+                const int active_n_max = dflash_cycle_slot->dm_adaptive && dflash_cycle_slot->adaptive_n_max >= 0
+                    ? dflash_cycle_slot->adaptive_n_max
+                    : base_n_max;
+                const int task_id = dflash_cycle_slot->task ? dflash_cycle_slot->task->id : -1;
+                SLT_INF(*dflash_cycle_slot,
+                        "dflash cycle: task=%d pos=%d adaptive_n_max=%d n_draft=%d n_accept=%d "
+                        "cross_len=%d ring_filled=%d committed=%d "
+                        "draft_ms=%.1f verify_ms=%.1f accept_ms=%.1f total_ms=%.1f "
+                        "reduced_verify=%d top_k=%d accept_bin=%d ctx_bucket=%d\n",
+                        task_id,
+                        (int) dflash_cycle_pos,
+                        active_n_max,
+                        dflash_cycle_n_draft,
+                        dflash_cycle_n_accept,
+                        ring_stats.cross_len,
+                        ring_stats.ring_filled,
+                        ring_stats.committed_len,
+                        t_draft_total / 1e3,
+                        t_verify_total / 1e3,
+                        t_accept_total / 1e3,
+                        t_cycle_total / 1e3,
+                        dflash_cycle_reduced_verify ? 1 : 0,
+                        dflash_cycle_reduced_top_k,
+                        server_slot::dflash_accept_bin(dflash_cycle_n_accept),
+                        server_slot::dflash_context_bucket(dflash_cycle_pos));
+            }
             if (profile_dflash_cycle) {
                 SRV_INF("spec cycle (%d slots): draft=%.1fms verify=%.1fms accept=%.1fms "
                         "other=%.1fms replay_sync=%.1fms recurrent_backup=%.1fms "

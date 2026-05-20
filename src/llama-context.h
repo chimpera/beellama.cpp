@@ -214,7 +214,10 @@ struct dflash_capture_data {
     uint64_t profile_raw_logits_bytes = 0;
     uint64_t profile_raw_logits_skipped = 0;
     uint64_t profile_reduced_logits_us = 0;
+    uint64_t profile_reduced_logits_ids_us = 0;
+    uint64_t profile_reduced_logits_probs_us = 0;
     uint64_t profile_reduced_logits_bytes = 0;
+    uint64_t profile_verify_sync_split_us = 0;
     uint64_t profile_cb_ask = 0;
     uint64_t profile_cb_hidden_ask = 0;
     uint64_t profile_cb_tape_ask = 0;

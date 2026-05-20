@@ -1105,6 +1105,14 @@ static bool dflash_diagnostic_debug_enabled() {
     return enabled;
 }
 
+static bool dflash_profile_sync_split_enabled() {
+    static const bool enabled = [] {
+        const char * env = std::getenv("GGML_DFLASH_PROFILE_SYNC_SPLIT");
+        return env && env[0] != '\0' && std::strcmp(env, "0") != 0;
+    }();
+    return enabled;
+}
+
 static void dflash_clear_prefill_cparams(llama_cparams & cparams) {
     cparams.prefill_gpu_n_seqs = 0;
     cparams.dflash_prefill_capture_active = false;
@@ -1126,7 +1134,10 @@ static void dflash_profile_reset(dflash_capture_data & cap) {
     cap.profile_raw_logits_bytes = 0;
     cap.profile_raw_logits_skipped = 0;
     cap.profile_reduced_logits_us = 0;
+    cap.profile_reduced_logits_ids_us = 0;
+    cap.profile_reduced_logits_probs_us = 0;
     cap.profile_reduced_logits_bytes = 0;
+    cap.profile_verify_sync_split_us = 0;
     cap.profile_cb_ask = 0;
     cap.profile_cb_hidden_ask = 0;
     cap.profile_cb_tape_ask = 0;
@@ -1172,7 +1183,8 @@ static void dflash_profile_log(const dflash_capture_data & cap, const char * fun
             "%s: dflash profile: decode=%.3f ms output_extract=%.3f ms "
             "raw_logits=%.3f ms raw_logits_bytes=%.3f MiB raw_logits_skipped=%" PRIu64
             " raw_logits_skipped_bytes_est=%.3f MiB "
-            "reduced_logits=%.3f ms reduced_logits_bytes=%.3f KiB "
+            "reduced_logits=%.3f ms reduced_logits_ids=%.3f ms reduced_logits_probs=%.3f ms "
+            "reduced_logits_bytes=%.3f KiB verify_sync_split=%.3f ms "
             "cb ask=%" PRIu64 " hidden=%" PRIu64 " tape=%" PRIu64 " qkv=%" PRIu64
             " read=%" PRIu64 " hidden=%" PRIu64 " tape=%" PRIu64 " qkv=%" PRIu64 "\n",
             func,
@@ -1183,7 +1195,10 @@ static void dflash_profile_log(const dflash_capture_data & cap, const char * fun
             cap.profile_raw_logits_skipped,
             skipped_bytes_est / (1024.0 * 1024.0),
             cap.profile_reduced_logits_us / 1000.0,
+            cap.profile_reduced_logits_ids_us / 1000.0,
+            cap.profile_reduced_logits_probs_us / 1000.0,
             cap.profile_reduced_logits_bytes / 1024.0,
+            cap.profile_verify_sync_split_us / 1000.0,
             cap.profile_cb_ask,
             cap.profile_cb_hidden_ask,
             cap.profile_cb_tape_ask,
@@ -5535,8 +5550,18 @@ int llama_context::decode(const llama_batch & batch_inp) {
         // while the cross-ring D2D copies run on cudaStreamPerThread. Prefer a
         // CUDA event dependency between those streams; fall back to the full
         // scheduler sync for CPU callback capture or backends without the helper.
-        if (dflash_capture && !dflash_wait_for_gpu_capture_stream()) {
+        const bool dflash_gpu_capture_stream_ready =
+            dflash_capture && dflash_wait_for_gpu_capture_stream();
+        if (dflash_capture && !dflash_gpu_capture_stream_ready) {
+            const int64_t t_sync_start_us = dflash_capture->profile ? ggml_time_us() : 0;
             ggml_backend_sched_synchronize(sched.get());
+            if (dflash_capture->profile && dflash_profile_sync_split_enabled()) {
+                dflash_capture->profile_verify_sync_split_us += ggml_time_us() - t_sync_start_us;
+            }
+        } else if (dflash_capture && dflash_capture->profile && dflash_profile_sync_split_enabled()) {
+            const int64_t t_sync_start_us = ggml_time_us();
+            ggml_backend_sched_synchronize(sched.get());
+            dflash_capture->profile_verify_sync_split_us += ggml_time_us() - t_sync_start_us;
         }
         if (dflash_capture && dflash_capture->profile && t_dflash_decode_start_us != 0) {
             dflash_capture->profile_decode_us += ggml_time_us() - t_dflash_decode_start_us;
@@ -5630,12 +5655,19 @@ int llama_context::decode(const llama_batch & batch_inp) {
             const int n_ids = K * n_outputs;
             const size_t ids_bytes = (size_t) n_ids * sizeof(int32_t);
             const size_t probs_bytes = (size_t) n_ids * sizeof(float);
-            const int64_t t_start_us = dflash_capture && dflash_capture->profile ? ggml_time_us() : 0;
+            const bool profile = dflash_capture && dflash_capture->profile;
+            const int64_t t_start_us = profile ? ggml_time_us() : 0;
             logits_argmax_buf.resize(n_ids);
+            const int64_t t_ids_start_us = profile ? ggml_time_us() : 0;
             ggml_backend_tensor_get_async(backend_argmax, t_argmax, logits_argmax_buf.data(), 0, ids_bytes);
+            if (profile) {
+                dflash_capture->profile_reduced_logits_ids_us += ggml_time_us() - t_ids_start_us;
+            }
             logits_argmax_prob_buf.resize(n_ids);
+            const int64_t t_probs_start_us = profile ? ggml_time_us() : 0;
             ggml_backend_tensor_get_async(backend_argmax, t_argmax, logits_argmax_prob_buf.data(), ids_bytes, probs_bytes);
-            if (dflash_capture && dflash_capture->profile) {
+            if (profile) {
+                dflash_capture->profile_reduced_logits_probs_us += ggml_time_us() - t_probs_start_us;
                 const int64_t elapsed_us = ggml_time_us() - t_start_us;
                 dflash_capture->profile_reduced_logits_us += elapsed_us;
                 dflash_capture->profile_output_extract_us += elapsed_us;
@@ -7248,6 +7280,7 @@ struct dflash_cross_ring_handle {
     void   (*fn_write)(void *, int, int, const float *, int, int);
     bool   (*fn_write_d2d)(void *, int, int, const void *, int, int);
     void   (*fn_synchronize)(void *);
+    bool   (*fn_snapshot)(void *, int, int, int, float *, int, int, int);
     const float * (*fn_interleave)(void *, int, int, int);
     void   (*fn_set_tensor)(void *, const void *, size_t, size_t);
 };
@@ -7270,6 +7303,7 @@ void * llama_context::init_cross_ring_gpu(int n_layers, int n_embd, int ring_siz
     using write_fn_t      = void   (*)(void *, int, int, const float *, int, int);
     using write_d2d_fn_t  = bool   (*)(void *, int, int, const void *, int, int);
     using sync_fn_t       = void   (*)(void *);
+    using snapshot_fn_t   = bool   (*)(void *, int, int, int, float *, int, int, int);
     using interleave_fn_t = const float * (*)(void *, int, int, int);
     using set_tensor_fn_t = void   (*)(void *, const void *, size_t, size_t);
 
@@ -7278,10 +7312,11 @@ void * llama_context::init_cross_ring_gpu(int n_layers, int n_embd, int ring_siz
     auto fn_write      = (write_fn_t)      ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cross_ring_gpu_write");
     auto fn_write_d2d  = (write_d2d_fn_t)  ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cross_ring_gpu_write_d2d");
     auto fn_sync       = (sync_fn_t)       ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cross_ring_gpu_synchronize");
+    auto fn_snapshot   = (snapshot_fn_t)   ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cross_ring_gpu_snapshot");
     auto fn_interleave = (interleave_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cross_ring_gpu_interleave");
     auto fn_set_tensor = (set_tensor_fn_t) ggml_backend_reg_get_proc_address(cuda_reg, "dflash_cross_ring_gpu_set_tensor");
 
-    if (!fn_alloc || !fn_free || !fn_write || !fn_write_d2d || !fn_sync || !fn_interleave || !fn_set_tensor) {
+    if (!fn_alloc || !fn_free || !fn_write || !fn_write_d2d || !fn_sync || !fn_snapshot || !fn_interleave || !fn_set_tensor) {
         return nullptr;
     }
 
@@ -7294,6 +7329,7 @@ void * llama_context::init_cross_ring_gpu(int n_layers, int n_embd, int ring_siz
     handle->fn_write      = fn_write;
     handle->fn_write_d2d  = fn_write_d2d;
     handle->fn_synchronize = fn_sync;
+    handle->fn_snapshot   = fn_snapshot;
     handle->fn_interleave = fn_interleave;
     handle->fn_set_tensor = fn_set_tensor;
     return handle;
@@ -7438,6 +7474,15 @@ void llama_dflash_cross_ring_gpu_synchronize(void * handle) {
     if (!handle) return;
     auto * h = (dflash_cross_ring_handle *)handle;
     h->fn_synchronize(h->gpu_ring);
+}
+
+bool llama_dflash_cross_ring_gpu_snapshot(
+        void * handle, int ring_write_pos, int ring_filled, int ctx_window,
+        float * data, int n_tokens, int n_layers, int n_embd) {
+    if (!handle) return false;
+    auto * h = (dflash_cross_ring_handle *)handle;
+    return h->fn_snapshot(h->gpu_ring, ring_write_pos, ring_filled, ctx_window,
+            data, n_tokens, n_layers, n_embd);
 }
 
 void llama_dflash_cross_ring_gpu_set_cross(

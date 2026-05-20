@@ -5639,6 +5639,7 @@ extern "C" bool   dflash_cuda_backend_wait_for_stream(ggml_backend_t);
 extern "C" bool   dflash_cuda_backend_wait_for_dflash_stream(ggml_backend_t);
 extern "C" bool dflash_replay_gdn_state_no_check(void *, const void *, const void *, const void *, const void *, int, int, int, int);
 extern "C" void   dflash_cross_ring_gpu_synchronize(void *);
+extern "C" bool   dflash_cross_ring_gpu_snapshot(void *, int, int, int, float *, int, int, int);
 extern "C" const float * dflash_cross_ring_gpu_interleave(void *, int, int, int);
 extern "C" void   dflash_cross_ring_gpu_set_tensor(void *, const void *, size_t, size_t);
 extern "C" bool   dflash_kv_cache_write_d2d(void *, const void *, int, int, int, int);
@@ -5716,6 +5717,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "dflash_cross_ring_gpu_synchronize") == 0) {
         return (void *)dflash_cross_ring_gpu_synchronize;
+    }
+    if (strcmp(name, "dflash_cross_ring_gpu_snapshot") == 0) {
+        return (void *)dflash_cross_ring_gpu_snapshot;
     }
     if (strcmp(name, "dflash_cross_ring_gpu_interleave") == 0) {
         return (void *)dflash_cross_ring_gpu_interleave;

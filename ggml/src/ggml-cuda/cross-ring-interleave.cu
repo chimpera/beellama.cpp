@@ -420,6 +420,44 @@ extern "C" void dflash_cross_ring_gpu_synchronize(void * handle) {
     cudaStreamSynchronize(cudaStreamPerThread);
 }
 
+extern "C" bool dflash_cross_ring_gpu_snapshot(
+        void * handle, int write_pos, int filled, int ctx_window,
+        float * host_data, int n_tokens, int n_layers, int n_embd) {
+    if (!handle || !host_data) return false;
+    auto * ring = (dflash_cross_ring_gpu *)handle;
+
+    if (n_layers != ring->n_layers || n_embd != ring->n_embd) return false;
+    if (ctx_window <= 0 || n_tokens < 0) return false;
+
+    int cross_len = filled < ctx_window ? filled : ctx_window;
+    if (cross_len > ring->ring_size) cross_len = ring->ring_size;
+    if (n_tokens != cross_len) return false;
+    if (cross_len == 0) return true;
+
+    (void)cudaSetDevice(ring->device);
+
+    int read_start = ((write_pos - cross_len) % ring->ring_size + ring->ring_size) % ring->ring_size;
+    const size_t stride = (size_t)n_embd * sizeof(float);
+
+    for (int layer = 0; layer < ring->n_layers; ++layer) {
+        const float * src = ring->h_layer_ptrs[layer];
+        float * dst = host_data + (size_t)layer * (size_t)cross_len * (size_t)n_embd;
+
+        int first = ring->ring_size - read_start;
+        if (first >= cross_len) {
+            cudaMemcpyAsync(dst, src + (size_t)read_start * n_embd,
+                    (size_t)cross_len * stride, cudaMemcpyDeviceToHost, cudaStreamPerThread);
+        } else {
+            cudaMemcpyAsync(dst, src + (size_t)read_start * n_embd,
+                    (size_t)first * stride, cudaMemcpyDeviceToHost, cudaStreamPerThread);
+            cudaMemcpyAsync(dst + (size_t)first * n_embd, src,
+                    (size_t)(cross_len - first) * stride, cudaMemcpyDeviceToHost, cudaStreamPerThread);
+        }
+    }
+
+    return cudaStreamSynchronize(cudaStreamPerThread) == cudaSuccess;
+}
+
 // Launch interleave kernel. Returns device pointer to interleaved staging buffer.
 extern "C" const float * dflash_cross_ring_gpu_interleave(
         void * handle, int write_pos, int filled, int ctx_window) {
