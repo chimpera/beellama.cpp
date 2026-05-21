@@ -719,6 +719,7 @@ int main(int argc, char ** argv) {
     ok &= expect(server_context.find("llama_dflash_rollback(ctx, slot.id, seq_backup, slot.n_pos_before_draft, n_hidden_keep)") != std::string::npos, "DFlash rollback must use the hidden-state keep count at grammar boundaries");
     ok &= expect(server_context.find("dflash_suppressed_for_reasoning_tool_marker") != std::string::npos, "server must disable DFlash after raw tool markers inside hidden reasoning without steering generation");
     ok &= expect(server_task.find("state.update_chat_msg(content, true, oaicompat_msg_diffs, true)") != std::string::npos, "streaming responses must filter partial tool-call deltas");
+    ok &= expect(server_task.find("state.update_chat_msg(content, false, oaicompat_msg_diffs, true)") != std::string::npos, "final tool-parsing responses must filter malformed raw tool-call text too");
     ok &= expect(server_task.find("task_result_has_complete_partial_tool_calls") != std::string::npos, "streaming responses must allow complete tool-call deltas before final EOS");
     ok &= expect(server_task.find("task_result_filter_incomplete_partial_tool_calls") != std::string::npos, "streaming responses must expose stable tool-call headers without partial arguments");
     ok &= expect(server_task.find("A partial stream may expose the stable tool name/id for UX") != std::string::npos, "partial tool-call streaming must document the header-only reliability boundary");
