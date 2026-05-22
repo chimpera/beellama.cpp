@@ -35,7 +35,7 @@ DFlash is strongest on structured, repetitive generation: code, tests, boilerpla
 
 * Setup: Windows 11, AMD Ryzen 7 5700X3D, 32 GB DDR4 RAM, RTX 3090 24 GB
 * Config: same as recommended in quick start docs ([Qwen 3.6 27B](docs/quickstart-qwen36-dflash.md), [Gemma 4 31B](docs/quickstart-gemma-4-31b-dflash.md))
-* Baseline llama.cpp used in comparison is [b9275](https://github.com/ggml-org/llama.cpp/releases/tag/b9275) CUDA 13.1 Windows prebuilt
+* Baseline and MTP in comparison: llama.cpp [b9275](https://github.com/ggml-org/llama.cpp/releases/tag/b9275) CUDA 13.1 Windows prebuilt
 
 <details>
 <summary>Benchmark prompts</summary>
@@ -216,21 +216,21 @@ Target model: [Qwen 3.6 27B Q5_K_S](https://huggingface.co/unsloth/Qwen3.6-27B-G
 
 | Prompt | Server | Output | Median | Best | Speedup | Acceptance |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Task store module | llama.cpp baseline | ~1K tok | 37.2 tok/s | 37.2 tok/s | 1.00x | N/A |
-| Task store module | Bee DFlash+ | ~1K tok | **163.9 tok/s** | 181.9 tok/s | **4.40x** | 67.7% / 89.2% |
-| Task store module | llama.cpp MTP | ~1K tok | 69.3 tok/s | 69.6 tok/s | 1.86x | 92.0% / 73.3% |
-| KV report module | llama.cpp baseline | ~1K tok | 34.6 tok/s | 36.5 tok/s | 1.00x | N/A |
-| KV report module | Bee DFlash+ | ~1K tok | **157.7 tok/s** | 162.5 tok/s | **4.56x** | 58.8% / 88.9% |
-| KV report module | llama.cpp MTP | ~1K tok | 67.3 tok/s | 68.1 tok/s | 1.94x | 89.3% / 73.0% |
-| Doubly-linked list | llama.cpp baseline | ~4K tok | 36.8 tok/s | 36.9 tok/s | 1.00x | N/A |
-| Doubly-linked list | Bee DFlash+ | ~4K tok | **130.8 tok/s** | 154.1 tok/s | **3.56x** | 50.4% / 86.8% |
-| Doubly-linked list | llama.cpp MTP | ~4K tok | 66.3 tok/s | 68.0 tok/s | 1.80x | 87.8% / 72.5% |
-| Prompt processing | llama.cpp baseline | ~20K tok | 1229.5 tok/s | 1229.5 tok/s | 1.00x | N/A |
-| Prompt processing | Bee DFlash+ | ~20K tok | **1214.4 tok/s** | 1221.7 tok/s | **0.99x** | N/A |
-| Prompt processing | llama.cpp MTP | ~20K tok | 1162.6 tok/s | 1164.7 tok/s | 0.95x | N/A |
-| Multi-turn coding | llama.cpp baseline | ~28K tok | 33.3 tok/s | 33.3 tok/s | 1.00x | N/A |
-| Multi-turn coding | Bee DFlash+ | ~30K tok | **64.6 tok/s** | 65.4 tok/s | **1.94x** | 24.9% / 72.9% |
-| Multi-turn coding | llama.cpp MTP | ~34K tok | 56.5 tok/s | 56.5 tok/s | 1.70x | 71.9% / 68.3% |
+| Task store module | Baseline | ~1K tok | 37.2 tok/s | 37.2 tok/s | 1.00x | N/A |
+| Task store module | DFlash | ~1K tok | **163.9 tok/s** | 181.9 tok/s | **4.40x** | 67.7% / 89.2% |
+| Task store module | MTP | ~1K tok | 69.3 tok/s | 69.6 tok/s | 1.86x | 92.0% / 73.3% |
+| KV report module | Baseline | ~1K tok | 34.6 tok/s | 36.5 tok/s | 1.00x | N/A |
+| KV report module | DFlash | ~1K tok | **157.7 tok/s** | 162.5 tok/s | **4.56x** | 58.8% / 88.9% |
+| KV report module | MTP | ~1K tok | 67.3 tok/s | 68.1 tok/s | 1.94x | 89.3% / 73.0% |
+| Doubly-linked list | Baseline | ~4K tok | 36.8 tok/s | 36.9 tok/s | 1.00x | N/A |
+| Doubly-linked list | DFlash | ~4K tok | **130.8 tok/s** | 154.1 tok/s | **3.56x** | 50.4% / 86.8% |
+| Doubly-linked list | MTP | ~4K tok | 66.3 tok/s | 68.0 tok/s | 1.80x | 87.8% / 72.5% |
+| Prompt processing | Baseline | ~20K tok | 1229.5 tok/s | 1229.5 tok/s | 1.00x | N/A |
+| Prompt processing | DFlash | ~20K tok | **1214.4 tok/s** | 1221.7 tok/s | **0.99x** | N/A |
+| Prompt processing | MTP | ~20K tok | 1162.6 tok/s | 1164.7 tok/s | 0.95x | N/A |
+| Multi-turn coding | Baseline | ~28K tok | 33.3 tok/s | 33.3 tok/s | 1.00x | N/A |
+| Multi-turn coding | DFlash | ~30K tok | **64.6 tok/s** | 65.4 tok/s | **1.94x** | 24.9% / 72.9% |
+| Multi-turn coding | MTP | ~34K tok | 56.5 tok/s | 56.5 tok/s | 1.70x | 71.9% / 68.3% |
 
 *Acceptance: accepted to proposed draft tokens / accepted draft tokens to final generated tokens*
 
@@ -240,16 +240,16 @@ Target model: [Gemma 4 31B Q4_K_S](https://huggingface.co/unsloth/gemma-4-31b-it
 
 | Prompt | Server | Output | Median | Best | Speedup | Acceptance |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Task store module | llama.cpp baseline | ~1K tok | 36.1 tok/s | 36.1 tok/s | 1.00x | N/A |
-| Task store module | Bee DFlash+ | ~1K tok | **177.8 tok/s** | 182.0 tok/s | **4.93x** | 65.7% / 90.0% |
-| KV report module | llama.cpp baseline | ~1K tok | 35.9 tok/s | 36.0 tok/s | 1.00x | N/A |
-| KV report module | Bee DFlash+ | ~1K tok | **154.3 tok/s** | 162.8 tok/s | **4.29x** | 55.7% / 88.6% |
-| Doubly-linked list | llama.cpp baseline | ~1.9K tok | 36.0 tok/s | 36.0 tok/s | 1.00x | N/A |
-| Doubly-linked list | Bee DFlash+ | ~1.9K tok | **116.6 tok/s** | 127.3 tok/s | **3.24x** | 44.5% / 84.9% |
-| Prompt processing | llama.cpp baseline | ~24K tok | 1021.3 tok/s | 1021.3 tok/s | 1.00x | N/A |
-| Prompt processing | Bee DFlash+ | ~24K tok | **954.5 tok/s** | 954.9 tok/s | **0.93x** | N/A |
-| Multi-turn coding | llama.cpp baseline | ~12K tok | 34.8 tok/s | 34.8 tok/s | 1.00x | N/A |
-| Multi-turn coding | Bee DFlash+ | ~12K tok | **60.6 tok/s** | 64.1 tok/s | **1.74x** | 24.4% / 72.3% |
+| Task store module | Baseline | ~1K tok | 36.1 tok/s | 36.1 tok/s | 1.00x | N/A |
+| Task store module | DFlash | ~1K tok | **177.8 tok/s** | 182.0 tok/s | **4.93x** | 65.7% / 90.0% |
+| KV report module | Baseline | ~1K tok | 35.9 tok/s | 36.0 tok/s | 1.00x | N/A |
+| KV report module | DFlash | ~1K tok | **154.3 tok/s** | 162.8 tok/s | **4.29x** | 55.7% / 88.6% |
+| Doubly-linked list | Baseline | ~1.9K tok | 36.0 tok/s | 36.0 tok/s | 1.00x | N/A |
+| Doubly-linked list | DFlash | ~1.9K tok | **116.6 tok/s** | 127.3 tok/s | **3.24x** | 44.5% / 84.9% |
+| Prompt processing | Baseline | ~24K tok | 1021.3 tok/s | 1021.3 tok/s | 1.00x | N/A |
+| Prompt processing | DFlash | ~24K tok | **954.5 tok/s** | 954.9 tok/s | **0.93x** | N/A |
+| Multi-turn coding | Baseline | ~12K tok | 34.8 tok/s | 34.8 tok/s | 1.00x | N/A |
+| Multi-turn coding | DFlash | ~12K tok | **60.6 tok/s** | 64.1 tok/s | **1.74x** | 24.4% / 72.3% |
 
 *Acceptance: accepted to proposed draft tokens / accepted draft tokens to final generated tokens*
 
