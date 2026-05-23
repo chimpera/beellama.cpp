@@ -43,6 +43,7 @@ struct clip_context_params {
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
     bool no_alloc;
+    int decoder_n_ubatch;
 };
 
 struct clip_init_result {

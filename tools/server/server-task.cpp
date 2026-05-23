@@ -12,6 +12,58 @@
 
 using json = nlohmann::ordered_json;
 
+static common_reasoning_loop_guard_mode server_reasoning_loop_guard_mode_from_name(const std::string & value) {
+    if (value == "off") {
+        return COMMON_REASONING_LOOP_GUARD_OFF;
+    }
+    if (value == "force-close") {
+        return COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE;
+    }
+    if (value == "stop") {
+        return COMMON_REASONING_LOOP_GUARD_STOP;
+    }
+    throw std::runtime_error("Error: reasoning_loop_guard must be one of: off, force-close, stop");
+}
+
+static const char * server_reasoning_loop_guard_mode_name(common_reasoning_loop_guard_mode value) {
+    switch (value) {
+        case COMMON_REASONING_LOOP_GUARD_OFF:         return "off";
+        case COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE: return "force-close";
+        case COMMON_REASONING_LOOP_GUARD_STOP:        return "stop";
+    }
+    return "unknown";
+}
+
+static void server_validate_reasoning_loop_guard_params(const common_reasoning_loop_guard_params & params) {
+    if (params.min_reasoning_tokens < 0) {
+        throw std::runtime_error("Error: reasoning_loop_min_tokens must be >= 0");
+    }
+    if (params.window_tokens <= 0) {
+        throw std::runtime_error("Error: reasoning_loop_window must be > 0");
+    }
+    if (params.max_period <= 0) {
+        throw std::runtime_error("Error: reasoning_loop_max_period must be > 0");
+    }
+    if (params.min_repeated_coverage <= 0) {
+        throw std::runtime_error("Error: reasoning_loop_min_coverage must be > 0");
+    }
+    if (params.check_interval <= 0) {
+        throw std::runtime_error("Error: reasoning_loop_check_interval must be > 0");
+    }
+    if (params.interventions_max < 0) {
+        throw std::runtime_error("Error: reasoning_loop_interventions must be >= 0");
+    }
+    if (params.window_tokens < params.min_repeated_coverage) {
+        throw std::runtime_error("Error: reasoning_loop_window must be >= reasoning_loop_min_coverage");
+    }
+    if (params.max_period > params.window_tokens / 3) {
+        throw std::runtime_error("Error: reasoning_loop_max_period must be <= reasoning_loop_window / 3");
+    }
+    if (params.min_reasoning_tokens < params.min_repeated_coverage) {
+        throw std::runtime_error("Error: reasoning_loop_min_tokens must be >= reasoning_loop_min_coverage");
+    }
+}
+
 //
 // task_params
 //
@@ -73,6 +125,13 @@ json task_params::to_json(bool only_metrics) const {
             {"min_keep",                  sampling.min_keep},
             {"chat_format",               common_chat_format_name(chat_parser_params.format)},
             {"reasoning_format",          common_reasoning_format_name(chat_parser_params.reasoning_format)},
+            {"reasoning_loop_guard",       server_reasoning_loop_guard_mode_name(reasoning_loop_guard.mode)},
+            {"reasoning_loop_min_tokens",  reasoning_loop_guard.min_reasoning_tokens},
+            {"reasoning_loop_window",      reasoning_loop_guard.window_tokens},
+            {"reasoning_loop_max_period",  reasoning_loop_guard.max_period},
+            {"reasoning_loop_min_coverage", reasoning_loop_guard.min_repeated_coverage},
+            {"reasoning_loop_check_interval", reasoning_loop_guard.check_interval},
+            {"reasoning_loop_interventions", reasoning_loop_guard.interventions_max},
             {"reasoning_in_content",      chat_parser_params.reasoning_in_content},
             {"generation_prompt",         chat_parser_params.generation_prompt},
             {"samplers",                  samplers},
@@ -130,6 +189,13 @@ json task_params::to_json(bool only_metrics) const {
         {"preserved_tokens",          sampling.preserved_tokens},
         {"chat_format",               common_chat_format_name(chat_parser_params.format)},
         {"reasoning_format",          common_reasoning_format_name(chat_parser_params.reasoning_format)},
+        {"reasoning_loop_guard",       server_reasoning_loop_guard_mode_name(reasoning_loop_guard.mode)},
+        {"reasoning_loop_min_tokens",  reasoning_loop_guard.min_reasoning_tokens},
+        {"reasoning_loop_window",      reasoning_loop_guard.window_tokens},
+        {"reasoning_loop_max_period",  reasoning_loop_guard.max_period},
+        {"reasoning_loop_min_coverage", reasoning_loop_guard.min_repeated_coverage},
+        {"reasoning_loop_check_interval", reasoning_loop_guard.check_interval},
+        {"reasoning_loop_interventions", reasoning_loop_guard.interventions_max},
         {"reasoning_in_content",      chat_parser_params.reasoning_in_content},
         {"generation_prompt",         chat_parser_params.generation_prompt},
         {"samplers",                  samplers},
@@ -144,6 +210,242 @@ json task_params::to_json(bool only_metrics) const {
 //
 // task_result_state
 //
+static bool task_result_has_explicit_tool_call_marker(const std::string & text);
+
+static bool task_result_has_complete_partial_tool_calls(
+        const std::string     & generated_text,
+        const common_chat_msg & msg) {
+    if (msg.tool_calls.empty()) {
+        return false;
+    }
+
+    for (const auto & tc : msg.tool_calls) {
+        if (tc.name.empty() || tc.arguments.empty()) {
+            return false;
+        }
+    }
+
+    const size_t end = generated_text.find_last_not_of(" \t\r\n");
+    if (end == std::string::npos) {
+        return false;
+    }
+
+    const size_t start = end > 512 ? end - 512 : 0;
+    const std::string tail = generated_text.substr(start, end - start + 1);
+
+    static const char * closing_markers[] = {
+        "</tool_call>",
+        "</function>",
+        "</seed:tool_call>",
+        "</minimax:tool_call>",
+        "</TOOLCALL>",
+        "<|tool_call_end|>",
+        "<|tool_calls_section_end|>",
+        "<tool_call|>",
+    };
+    for (const char * marker : closing_markers) {
+        if (tail.find(marker) != std::string::npos) {
+            return true;
+        }
+    }
+
+    if (task_result_has_explicit_tool_call_marker(generated_text)) {
+        return false;
+    }
+
+    const char last = generated_text[end];
+    return last == '}' || last == ']' || last == ')';
+}
+
+static bool task_result_pos_is_in_code_fence(
+        const std::string & text,
+        size_t              pos) {
+    bool in_fence = false;
+    size_t search = 0;
+    while (search < pos) {
+        const size_t fence = text.find("```", search);
+        if (fence == std::string::npos || fence >= pos) {
+            break;
+        }
+        in_fence = !in_fence;
+        search = fence + 3;
+    }
+    return in_fence;
+}
+
+static bool task_result_raw_tool_marker_has_boundary(
+        const std::string & text,
+        size_t              pos) {
+    if (pos == 0) {
+        return true;
+    }
+
+    const char prev = text[pos - 1];
+    return prev == '\n' || prev == '\r' || prev == '\t' || prev == ' ' || prev == '>';
+}
+
+static size_t task_result_find_raw_tool_marker(
+        const std::string & text,
+        size_t              search_from) {
+    static const char * markers[] = {
+        "<tool_call",
+        "<function=",
+        "<parameter=",
+        "<|tool_calls_section_begin|>",
+        "<|tool_call_begin|>",
+        "<|tool_call_start|>",
+        "<seed:tool_call",
+        "<minimax:tool_call",
+        "<TOOLCALL",
+    };
+
+    size_t best = std::string::npos;
+    for (const char * marker : markers) {
+        size_t pos = text.find(marker, search_from);
+        while (pos != std::string::npos) {
+            if (task_result_raw_tool_marker_has_boundary(text, pos) &&
+                    !task_result_pos_is_in_code_fence(text, pos)) {
+                best = best == std::string::npos ? pos : std::min(best, pos);
+                break;
+            }
+            pos = text.find(marker, pos + 1);
+        }
+    }
+
+    return best;
+}
+
+static bool task_result_has_explicit_tool_call_marker(const std::string & text) {
+    return task_result_find_raw_tool_marker(text, 0) != std::string::npos;
+}
+
+static bool task_result_starts_with_raw_tool_marker(const std::string & text) {
+    const size_t marker = task_result_find_raw_tool_marker(text, 0);
+    if (marker == std::string::npos) {
+        return false;
+    }
+
+    const size_t first = text.find_first_not_of(" \t\r\n");
+    return first != std::string::npos && marker == first;
+}
+
+static void task_result_quarantine_raw_tool_text_field(
+        std::string       & text,
+        const std::string & previous) {
+    if (text.size() <= previous.size()) {
+        return;
+    }
+
+    const size_t search_from = previous.size() > 64 ? previous.size() - 64 : 0;
+    const size_t marker = task_result_find_raw_tool_marker(text, search_from);
+    if (marker == std::string::npos) {
+        return;
+    }
+
+    if (marker < previous.size()) {
+        text = previous;
+    } else {
+        text.resize(marker);
+    }
+}
+
+static void task_result_quarantine_raw_tool_text(
+        common_chat_msg       & new_msg,
+        const common_chat_msg & msg_prv) {
+    if (new_msg.tool_calls.size() > msg_prv.tool_calls.size()) {
+        return;
+    }
+
+    task_result_quarantine_raw_tool_text_field(new_msg.content, msg_prv.content);
+    task_result_quarantine_raw_tool_text_field(new_msg.reasoning_content, msg_prv.reasoning_content);
+}
+
+static void task_result_freeze_text_fields(
+        common_chat_msg       & new_msg,
+        const common_chat_msg & msg_prv) {
+    new_msg.content = msg_prv.content;
+    new_msg.content_parts = msg_prv.content_parts;
+    new_msg.reasoning_content = msg_prv.reasoning_content;
+}
+
+static bool task_result_has_marker_after_anchor(
+        const std::string & generated_text,
+        const std::string & anchor) {
+    if (anchor.empty()) {
+        return false;
+    }
+
+    const size_t pos = generated_text.rfind(anchor);
+    if (pos == std::string::npos) {
+        return false;
+    }
+
+    const size_t tail_len = std::min<size_t>(generated_text.size() - pos, 512);
+    const std::string tail = generated_text.substr(pos, tail_len);
+
+    static const char * argument_markers[] = {
+        "<|tool_call_argument_begin|>",
+        "<parameter=",
+        "\"arguments\"",
+        "'arguments'",
+        "arguments:",
+        "arguments=",
+    };
+    for (const char * marker : argument_markers) {
+        if (tail.find(marker) != std::string::npos) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool task_result_has_stable_partial_tool_call_header(
+        const std::string           & generated_text,
+        const common_chat_tool_call & tc) {
+    if (tc.name.empty()) {
+        return false;
+    }
+
+    return task_result_has_marker_after_anchor(generated_text, tc.id) ||
+           task_result_has_marker_after_anchor(generated_text, tc.name);
+}
+
+static void task_result_filter_incomplete_partial_tool_calls(
+        const std::string     & generated_text,
+        common_chat_msg       & new_msg,
+        const common_chat_msg & msg_prv) {
+    std::vector<common_chat_tool_call> filtered;
+    filtered.reserve(std::max(new_msg.tool_calls.size(), msg_prv.tool_calls.size()));
+
+    for (size_t i = 0; i < new_msg.tool_calls.size(); ++i) {
+        common_chat_tool_call tc = new_msg.tool_calls[i];
+        if (i < msg_prv.tool_calls.size()) {
+            if (tc.name.empty()) {
+                tc.name = msg_prv.tool_calls[i].name;
+            }
+            if (tc.id.empty()) {
+                tc.id = msg_prv.tool_calls[i].id;
+            }
+        }
+
+        if (!task_result_has_stable_partial_tool_call_header(generated_text, tc)) {
+            break;
+        }
+
+        // A partial stream may expose the stable tool name/id for UX, but the
+        // arguments remain hidden until a complete call is parsed.
+        tc.arguments = i < msg_prv.tool_calls.size() ? msg_prv.tool_calls[i].arguments : "";
+        filtered.push_back(std::move(tc));
+    }
+
+    while (filtered.size() < msg_prv.tool_calls.size()) {
+        filtered.push_back(msg_prv.tool_calls[filtered.size()]);
+    }
+
+    new_msg.tool_calls = std::move(filtered);
+}
+
 task_result_state::task_result_state(const common_chat_parser_params & chat_parser_params)
     : chat_parser_params(chat_parser_params)
     , oai_resp_id("resp_" + random_string())
@@ -169,6 +471,19 @@ common_chat_msg task_result_state::update_chat_msg(
         chat_parser_params);
     if (!new_msg.empty()) {
         new_msg.set_tool_call_ids(generated_tool_call_ids, gen_tool_call_id);
+        if (filter_tool_calls && chat_parser_params.parse_tool_calls) {
+            const bool has_complete_tool_calls = task_result_has_complete_partial_tool_calls(generated_text, new_msg);
+            if (!new_msg.tool_calls.empty() &&
+                    (!has_complete_tool_calls || task_result_starts_with_raw_tool_marker(generated_text))) {
+                task_result_freeze_text_fields(new_msg, msg_prv_copy);
+            }
+            if (!has_complete_tool_calls) {
+                task_result_quarantine_raw_tool_text(new_msg, msg_prv_copy);
+            }
+            if (!has_complete_tool_calls) {
+                task_result_filter_incomplete_partial_tool_calls(generated_text, new_msg, msg_prv_copy);
+            }
+        }
         chat_msg = new_msg;
         auto all_diffs = common_chat_msg_diff::compute_diffs(msg_prv_copy, chat_msg);
 
@@ -248,6 +563,7 @@ task_params server_task::params_from_json_cmpl(
     task_params defaults;
     defaults.sampling      = params_base.sampling;
     defaults.speculative   = params_base.speculative;
+    defaults.reasoning_loop_guard = params_base.reasoning_loop_guard;
     defaults.n_keep        = params_base.n_keep;
     defaults.n_predict     = params_base.n_predict;
     defaults.n_cache_reuse = params_base.n_cache_reuse;
@@ -329,6 +645,18 @@ task_params server_task::params_from_json_cmpl(
     params.speculative.ngram_size_m     = std::max(std::min(1, (int) params.speculative.ngram_size_m),     1024);
     params.speculative.ngram_min_hits   = std::max(std::min(1, (int) params.speculative.ngram_min_hits),   1024);
 #endif
+
+    params.reasoning_loop_guard = defaults.reasoning_loop_guard;
+    if (data.contains("reasoning_loop_guard")) {
+        params.reasoning_loop_guard.mode = server_reasoning_loop_guard_mode_from_name(data.at("reasoning_loop_guard").get<std::string>());
+    }
+    params.reasoning_loop_guard.min_reasoning_tokens = json_value(data, "reasoning_loop_min_tokens", params.reasoning_loop_guard.min_reasoning_tokens);
+    params.reasoning_loop_guard.window_tokens = json_value(data, "reasoning_loop_window", params.reasoning_loop_guard.window_tokens);
+    params.reasoning_loop_guard.max_period = json_value(data, "reasoning_loop_max_period", params.reasoning_loop_guard.max_period);
+    params.reasoning_loop_guard.min_repeated_coverage = json_value(data, "reasoning_loop_min_coverage", params.reasoning_loop_guard.min_repeated_coverage);
+    params.reasoning_loop_guard.check_interval = json_value(data, "reasoning_loop_check_interval", params.reasoning_loop_guard.check_interval);
+    params.reasoning_loop_guard.interventions_max = json_value(data, "reasoning_loop_interventions", params.reasoning_loop_guard.interventions_max);
+    server_validate_reasoning_loop_guard_params(params.reasoning_loop_guard);
 
     // Use OpenAI API logprobs only if n_probs wasn't provided
     if (data.contains("logprobs") && params.sampling.n_probs == defaults.sampling.n_probs){
@@ -513,6 +841,16 @@ task_params server_task::params_from_json_cmpl(
                 params.sampling.reasoning_budget_end.size(),
                 params.sampling.reasoning_budget_forced.size());
         }
+    }
+
+    {
+        const bool loop_guard_active =
+            params.reasoning_loop_guard.mode != COMMON_REASONING_LOOP_GUARD_OFF &&
+            params.chat_parser_params.reasoning_format != COMMON_REASONING_FORMAT_NONE;
+        const bool has_reasoning_tags =
+            !params.sampling.reasoning_budget_start.empty() &&
+            !params.sampling.reasoning_budget_end.empty();
+        params.sampling.reasoning_budget_tracking = loop_guard_active && has_reasoning_tags;
     }
 
     {
@@ -763,10 +1101,20 @@ json server_task_result_cmpl_final::to_json_non_oaicompat() {
         {"has_new_line",        has_new_line},
         {"truncated",           truncated},
         {"stop_type",           stop_type_to_str(stop)},
+        {"stop_detail",         stop_detail},
+        {"reasoning_tokens",    reasoning_output_tokens},
+        {"visible_completion_tokens", visible_output_tokens},
         {"stopping_word",       stopping_word},
         {"tokens_cached",       n_tokens_cached},
         {"timings",             timings.to_json()},
     };
+    if (loop_guard_triggered) {
+        res["loop_guard"] = json {
+            {"triggered", true},
+            {"action", loop_guard_action},
+            {"reason", loop_guard_reason},
+        };
+    }
     if (!stream && !probs_output.empty()) {
         res["completion_probabilities"] = completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
     }
@@ -774,12 +1122,19 @@ json server_task_result_cmpl_final::to_json_non_oaicompat() {
 }
 
 json server_task_result_cmpl_final::usage_json_oaicompat() {
-    return json {
+    json usage = json {
         {"completion_tokens", n_decoded},
         {"prompt_tokens",     n_prompt_tokens},
         {"total_tokens",      n_decoded + n_prompt_tokens},
         {"prompt_tokens_details", json { {"cached_tokens", n_prompt_tokens_cache} }},
     };
+    if (reasoning_output_tokens >= 0 && visible_output_tokens >= 0) {
+        usage["completion_tokens_details"] = json {
+            {"reasoning_tokens", reasoning_output_tokens},
+            {"visible_tokens", visible_output_tokens},
+        };
+    }
+    return usage;
 }
 
 json server_task_result_cmpl_final::to_json_oaicompat() {
@@ -1392,7 +1747,7 @@ json server_task_result_cmpl_final::to_json_anthropic_stream() {
 //
 void server_task_result_cmpl_partial::update(task_result_state & state) {
     is_updated = true;
-    state.update_chat_msg(content, true, oaicompat_msg_diffs);
+    state.update_chat_msg(content, true, oaicompat_msg_diffs, true);
 
     // Copy current state for use in to_json_*() (reflects state BEFORE this chunk)
     thinking_block_started = state.thinking_block_started;
