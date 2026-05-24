@@ -368,6 +368,14 @@ int main(int argc, char ** argv) {
     ok &= expect(qwen35moe.find("const bool need_full_h_pre_norm = cparams.embeddings_pre_norm && !cparams.embeddings_pre_norm_masked;") != std::string::npos &&
                  qwen35moe.find("inp_out_ids && !need_full_h_pre_norm") != std::string::npos,
         "Qwen3.5-MoE prefill must gather final-layer output rows early unless full pre-norm embeddings are requested");
+    ok &= expect(qwen35.find("const int64_t n_head_kv_il = hparams.n_head_kv(il);") != std::string::npos &&
+                 qwen35.find("Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv_il, n_tokens);") != std::string::npos &&
+                 qwen35.find("Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv_il, n_tokens);") != std::string::npos,
+        "Qwen3.5 full-attention layers must use per-layer n_head_kv for RYS-compatible KV shapes");
+    ok &= expect(qwen35moe.find("const int64_t n_head_kv_il = hparams.n_head_kv(il);") != std::string::npos &&
+                 qwen35moe.find("Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv_il, n_tokens);") != std::string::npos &&
+                 qwen35moe.find("Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv_il, n_tokens);") != std::string::npos,
+        "Qwen3.5-MoE full-attention layers must use per-layer n_head_kv for RYS-compatible KV shapes");
     ok &= expect(dflash_profile_h.find("GGML_DFLASH_PROFILE") != std::string::npos, "DFlash profile helper must honor profiling flag");
     ok &= expect(speculative.find("gpu_sync=%.3f ms") != std::string::npos, "DFlash ring profiling must report GPU sync time");
     ok &= expect(speculative.find("kv_cache_update requested=%d update=%d") != std::string::npos, "DFlash accept profiling must report drafter K/V cache update time");
