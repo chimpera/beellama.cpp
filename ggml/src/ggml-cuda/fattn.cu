@@ -1691,7 +1691,15 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         const bool k_is_f16_q8_or_turbo = (K->type == GGML_TYPE_F16) || (K->type == GGML_TYPE_Q8_0) || turbo_k_only;
         const bool v_is_f16_q8_or_turbo = (V->type == GGML_TYPE_F16) || (V->type == GGML_TYPE_Q8_0) || turbo_v_only;
         const bool both_dequantable_512 = k_is_f16_q8_or_turbo && v_is_f16_q8_or_turbo;
-        const bool do_decode_dequant = !turbo_decode_native && turbo_kv && (Q->ne[0] <= 256 || (Q->ne[0] <= 512 && both_dequantable_512));
+#if defined(GGML_USE_HIP)
+        const bool hip_native_tcq_decode =
+            K->type == GGML_TYPE_TURBO3_TCQ || K->type == GGML_TYPE_TURBO2_TCQ ||
+            V->type == GGML_TYPE_TURBO3_TCQ || V->type == GGML_TYPE_TURBO2_TCQ;
+#else
+        const bool hip_native_tcq_decode = false;
+#endif
+        const bool do_decode_dequant = !hip_native_tcq_decode && !turbo_decode_native && turbo_kv &&
+            (Q->ne[0] <= 256 || (Q->ne[0] <= 512 && both_dequantable_512));
 
         half * k_fp16_dec = nullptr;
         half * v_fp16_dec = nullptr;
