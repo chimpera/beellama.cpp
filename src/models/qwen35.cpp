@@ -157,6 +157,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
 
     ggml_tensor * inp_pos     = build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
+    const bool need_full_h_pre_norm = cparams.embeddings_pre_norm && !cparams.embeddings_pre_norm_masked;
     const int64_t n_seqs       = ubatch.n_seqs;
     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
     const int64_t dflash_capture_n_seqs =
@@ -183,7 +184,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
             cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
         }
 
-        if (il == n_transformer_layers - 1 && inp_out_ids && cparams.embeddings_pre_norm_masked) {
+        if (il == n_transformer_layers - 1 && inp_out_ids && !need_full_h_pre_norm) {
             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -291,7 +292,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
     cb(cur, "h_pre_norm", -1);
     res->t_h_pre_norm = cur;
 
-    if (!cparams.embeddings_pre_norm_masked && inp_out_ids) {
+    if (need_full_h_pre_norm && inp_out_ids) {
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
     }
 

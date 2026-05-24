@@ -362,6 +362,12 @@ int main(int argc, char ** argv) {
     ok &= expect(context_cpp.find("std::swap(logits_argmax_prob_buf") != std::string::npos, "output reordering must include reduced logits probabilities");
     ok &= expect(qwen35.find("ggml_build_forward_expand(gf, ggml_cpy(ctx0, qkv_cont, qkv_dst))") != std::string::npos, "Qwen3.5 must graph-copy QKV into GPU tape");
     ok &= expect(qwen35moe.find("ggml_build_forward_expand(gf, ggml_cpy(ctx0, qkv_cont, qkv_dst))") != std::string::npos, "Qwen3.5-MoE must graph-copy QKV into GPU tape");
+    ok &= expect(qwen35.find("const bool need_full_h_pre_norm = cparams.embeddings_pre_norm && !cparams.embeddings_pre_norm_masked;") != std::string::npos &&
+                 qwen35.find("inp_out_ids && !need_full_h_pre_norm") != std::string::npos,
+        "Qwen3.5 prefill must gather final-layer output rows early unless full pre-norm embeddings are requested");
+    ok &= expect(qwen35moe.find("const bool need_full_h_pre_norm = cparams.embeddings_pre_norm && !cparams.embeddings_pre_norm_masked;") != std::string::npos &&
+                 qwen35moe.find("inp_out_ids && !need_full_h_pre_norm") != std::string::npos,
+        "Qwen3.5-MoE prefill must gather final-layer output rows early unless full pre-norm embeddings are requested");
     ok &= expect(dflash_profile_h.find("GGML_DFLASH_PROFILE") != std::string::npos, "DFlash profile helper must honor profiling flag");
     ok &= expect(speculative.find("gpu_sync=%.3f ms") != std::string::npos, "DFlash ring profiling must report GPU sync time");
     ok &= expect(speculative.find("kv_cache_update requested=%d update=%d") != std::string::npos, "DFlash accept profiling must report drafter K/V cache update time");
