@@ -67,7 +67,7 @@ What this shape means:
 | `--spec-type dflash`, `--spec-draft-model`, `--spec-draft-n-max`, `--spec-dflash-cross-ctx` | Enable flat DFlash drafting and choose draft depth/window. |
 | `-np 1`, `--kv-unified`, `--ctx-size` | Run one server slot with explicit unified KV and a large target context. |
 | `-ngl all`, `--spec-draft-ngl all` | Fully offload target and draft models when devices can hold them. |
-| `-b`, `-ub` | Override DFlash-safe parser caps for prompt prefill batching. |
+| `-b`, `-ub` | Set target prompt prefill batching. Bee keeps upstream defaults unless you override them. |
 | `--cache-type-k`, `--cache-type-v` | Use asymmetric KV precision. |
 | `--cache-ram 0` | Disable the server prompt-cache RAM subsystem. Live-slot prefix reuse still works. |
 | `--no-mmap`, `--mlock`, `--no-host` | Prefer locked model memory and direct backend buffer behavior over filesystem cache behavior. |
@@ -93,7 +93,6 @@ Draft model loading uses parallel draft-specific names:
 | --- | --- | --- |
 | `--spec-draft-model`, `-md`, `--model-draft FNAME` | Unset | Draft model GGUF path. Required for DFlash unless loaded through draft HF args. |
 | `--spec-draft-hf`, `-hfd`, `-hfrd`, `--hf-repo-draft <user>/<model>[:quant]` | Unset | Resolve draft model from Hugging Face. |
-| `--spec-draft-replace`, `--spec-replace TARGET DRAFT` | Unset | Map target tokens/strings to draft equivalents when the draft model needs replacements. |
 
 Bee auto-detects DFlash when a loaded draft model reports a DFlash block size and `--spec-type` was not already `dflash`.
 
@@ -158,16 +157,16 @@ Advanced draft placement:
 | `-kvu`, `--kv-unified`; `-no-kvu`, `--no-kv-unified` | Raw default false; help notes enabled if slots are auto | Single unified KV buffer shared across sequences. Required by idle-slot cache. |
 | `--cache-idle-slots`, `--no-cache-idle-slots` | Enabled in params, but requires unified KV and cache RAM | Save and clear idle slots when a new task starts. Disabled by the server if requirements are not met. |
 
-DFlash-specific parser safety:
+DFlash-specific parser defaults:
 
 | Situation | Effective behavior |
 | --- | --- |
 | `--spec-type dflash` and no `--spec-draft-ctx-size` | Bee sets draft context to `256`. |
-| `--spec-type dflash` and no explicit `-b` | Bee caps inherited batch default to `256`. |
-| `--spec-type dflash` and no explicit `-ub` | Bee caps inherited microbatch default to `64`. |
+| `--spec-type dflash` and no explicit `-b` | Bee keeps the upstream target batch default, currently `2048`. |
+| `--spec-type dflash` and no explicit `-ub` | Bee keeps the upstream target microbatch default, currently `512`. |
 | You pass explicit `-b` or `-ub` | Bee keeps your values. |
 
-The parser caps are OOM safety defaults, not performance guidance. For large prompt prefill, explicitly set `-b` and `-ub` after measuring memory.
+DFlash no longer lowers the target batch defaults at parse time. If memory is tight, lower `-b` or `-ub` explicitly after measuring the model, context, KV type, and draft placement.
 
 ## KV Cache Precision
 
@@ -252,16 +251,17 @@ DFlash core args:
 | `--spec-draft-ngl`, `-ngld` | `auto` | Draft model GPU layers. |
 | `--spec-draft-type-k`, `-ctkd`, `--cache-type-k-draft` | `f16` | Draft model K cache precision. |
 | `--spec-draft-type-v`, `-ctvd`, `--cache-type-v-draft` | `f16` | Draft model V cache precision. |
-| `--spec-draft-n-max` | `16` | Base max main-path draft tokens. |
+| `--spec-draft-n-max` | Raw upstream `3`; DFlash effective `16` if omitted | Base max main-path draft tokens. |
 | `--spec-draft-n-min` | `0` | Minimum draft length required before speculative verification is used. |
 | `--spec-branch-budget` | `0` | DDTree branch nodes beyond the main draft path. `0` means flat DFlash. |
-| `--tree-budget TOTAL` | Unset legacy input | Public-buun-style total-node budget. Bee converts to branch budget unless canonical branch budget is present. |
-| `--spec-draft-top-k`, `--draft-topk` | `1` | Candidates per draft position for tree mode. Forced to `1` when branch budget is `0`. |
+| `--spec-draft-top-k` | `1` | Candidates per draft position for tree mode. Forced to `1` when branch budget is `0`. |
 | `--spec-draft-p-split`, `--draft-p-split` | `0.10` | Probability threshold for creating tree branches. |
 | `--spec-draft-p-min`, `--draft-p-min` | `0.0` | Minimum draft probability gate. |
 | `--spec-draft-temp T` | `0.0` | DFlash drafter temperature. `0` greedy, positive uses sampled/Gumbel path, `auto` mirrors target temp. |
 | `--spec-dflash-cross-ctx N` | `512` | Recent target hidden-state tokens visible to the DFlash drafter. |
 | `--spec-dflash-max-slots N` | Match `-np` | Max server slots with DFlash state; higher slots fall back to non-speculative decoding. Use this to cap DFlash below `-np`. |
+
+DFlash-only args such as `--spec-branch-budget`, `--spec-draft-top-k`, `--spec-draft-temp`, `--spec-dflash-*`, and `--spec-dm-*` do not change MTP or other non-DFlash speculative modes. If they are passed without `--spec-type dflash`, Bee preserves them while a supplied draft model can still auto-detect as DFlash; otherwise it emits a warning and ignores them.
 
 Flat DFlash:
 
@@ -349,7 +349,6 @@ Presets:
 | Arg | Behavior |
 | --- | --- |
 | `--spec-default` | Sets `ngram-mod` with match `24`, min `48`, max `64`. |
-| `--spec-dflash-default` | Sets DFlash mode with `p_min=0`, `n_max=16`, `n_min=0`. Prefer explicit `--spec-type dflash --spec-draft-model ... --spec-draft-n-max ...` for reproducible commands. |
 
 Removed generic ngram args:
 
@@ -359,25 +358,33 @@ Removed generic ngram args:
 | `--spec-ngram-size-m` | The backend-specific `--spec-ngram-*-size-m`. |
 | `--spec-ngram-min-hits` | The backend-specific `--spec-ngram-*-min-hits`. |
 
-## Legacy DFlash Spellings
+## DFlash Compatibility Spellings
 
 Accepted aliases:
 
 | Alias | Current target |
 | --- | --- |
+| `--draft-p-split` | `--spec-draft-p-split` |
+| `--draft-p-min` | `--spec-draft-p-min` |
+
+Removed in `v0.3.0`:
+
+| Removed arg | Use instead |
+| --- | --- |
 | `--draft`, `--draft-n`, `--draft-max` | `--spec-draft-n-max` |
 | `--draft-min`, `--draft-n-min` | `--spec-draft-n-min` |
 | `--draft-topk` | `--spec-draft-top-k` |
-| `--draft-p-split` | `--spec-draft-p-split` |
-| `--draft-p-min` | `--spec-draft-p-min` |
-| `--tree-budget TOTAL` | Legacy total-node DDTree input converted to branch-only semantics |
+| `--draft-model` | `--spec-draft-model`, `-md`, or upstream `--model-draft` |
+| `--dflash-max-slots` | `--spec-dflash-max-slots` |
+| `--tree-budget TOTAL` | `--spec-branch-budget N` branch nodes beyond the main draft path |
+| `--spec-dflash-default` | `--spec-type dflash --spec-draft-model ...` with explicit DFlash args |
+| `--spec-draft-replace`, `--spec-replace` | No replacement; the parsed replacement list was unused |
 
 Names from older buun-era experiments that are not accepted by the current Bee parser include:
 
 ```text
 --draft-temp
 --dflash-cross-ctx
---dflash-max-slots
 --dm-adaptive
 --dm-ar-up
 --dm-ar-down
@@ -540,7 +547,6 @@ Speculative fields:
 | `speculative.n_min` | Per-request minimum draft length. |
 | `speculative.n_max` | Per-request max main-path draft length. |
 | `speculative.branch_budget` | Per-request branch budget. |
-| `speculative.tree_budget` | Legacy total-node budget, converted to branch budget if `speculative.branch_budget` is absent. |
 | `speculative.p_min` | Per-request draft probability gate. |
 
 Prompt/cache fields:

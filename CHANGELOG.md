@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.3.0
+
+- Rebased BeeLlama onto a much newer llama.cpp upstream while preserving the fork-specific DFlash, CopySpec, DDTree, TurboQuant/TCQ, Tom TQ, Gemma, Qwen, multimodal, reasoning, and server changes that were still production-ready.
+- Adopted the upstream speculative-decoding framework shape for Bee features, including the newer MTP support, parallel drafting infrastructure, backend sampling path, and upstream spec argument naming.
+- Preserved DFlash explicit selection and DFlash draft-GGUF auto-detection, including support for both Bee/buun `dflash-draft` and upstream-style `dflash` draft metadata.
+- Kept upstream raw `--spec-draft-n-max` default at `3`, but applies DFlash's effective omitted draft max of `16` only when DFlash is explicit or auto-detected.
+- Restored upstream target batch defaults for DFlash: `-b` remains `2048` and `-ub` remains `512` unless the user overrides them.
+- Kept DFlash's effective omitted draft context default at `-cd 256`, including the server-side auto-detect path where DFlash is only known after loading the draft model.
+- Removed stale or misleading speculative CLI surface: `--spec-dflash-default`, `--draft`, `--draft-n`, `--draft-max`, `--draft-min`, `--draft-n-min`, `--tree-budget`, `--dflash-max-slots`, `--draft-topk`, `--draft-model`, `--spec-draft-replace`, and `--spec-replace`.
+- Kept upstream-compatible draft aliases such as `--model-draft`, `--draft-p-split`, and `--draft-p-min`; canonical Bee DFlash controls now use `--spec-*` names.
+- Made DFlash-only args warning/no-op for MTP and other non-DFlash modes, while preserving them long enough for server-side DFlash draft-model auto-detection when a draft model is supplied without an explicit `--spec-type`.
+- Gated adaptive Draft-Max to actual DFlash slots so MTP and other non-DFlash modes do not inherit DFlash adaptive depth behavior.
+- Restored `--spec-draft-temp` for sampled DFlash, including greedy `0`, positive sampled/Gumbel drafter temperature, and `auto` mirroring of target temperature.
+- Preserved CopySpec, suffix-tree speculation, recycle speculation, and upstream ngram speculative modes as explicit opt-in backends.
+- Preserved branch-only DDTree verification through `--spec-branch-budget`, restored Qwen DDTree conv and GDN paths, and removed the old public-buun total-node `--tree-budget` CLI spelling.
+- Restored Qwen per-layer KV heads, Qwen final-layer output gather, and Qwen MTP draft-context stability after the upstream merge.
+- Preserved DFlash hidden-state capture, the 4096-token per-layer CPU ring, configurable DFlash cross-attention window, GPU ring path, and DFlash draft graph integration.
+- Added DFlash GPU hidden-ring span guards, discarded stale DFlash ring checkpoints, skipped checkpoints for uncached prompts, and avoided raw prompt-logit output in DFlash paths that should not request it.
+- Restored DFlash tool-call drafting and stale drafter-state cleanup so long tool-call content can use DFlash without corrupting syntax or lazy-grammar behavior.
+- Fixed DFlash multi-slot serving issues: slots now default to server parallelism, mixed speculative/non-spec target batches are avoided, uneven `-np` target batches are split safely, and shared prefill capture state is restored.
+- Enabled device-aware multi-GPU DFlash capture/tape/replay by default on v0.3.0, with `GGML_DFLASH_MULTI_GPU_TAPE=0` and `GGML_DFLASH_ALLOW_MULTI_GPU_TAPE=0` kill switches.
+- Added per-layer device placement for DFlash hidden capture, prefill capture, recurrent tape, conv replay, direct GDN replay, recurrent backup copy plans, and multi-device synchronization.
+- Hardened DFlash CUDA helpers by preserving the caller CUDA device, enabling peer D2D copies where available, validating pointer-device placement before direct replay, and falling back to CPU/eval-callback paths when split placement is unsupported.
+- Kept DFlash draft model placement single-device by default unless the user explicitly passes draft-device placement.
+- Restored and preserved adaptive Draft-Max fixes: profit-controller cold start, premature demotion prevention, per-request state reset, continuation-state preservation, and profiling-gated timing logs.
+- Preserved TurboQuant and TCQ cache backends (`turbo2`, `turbo3`, `turbo4`, `turbo2_tcq`, `turbo3_tcq`), buun-compatible cache enum layout, and 128-value `turbo2`/`turbo3` block sizes from Tom's public TurboQuant work.
+- Preserved Tom's `TQ3_1S` and `TQ4_1S` model weight formats with non-conflicting GGML type IDs.
+- Kept HIP TCQ attention on the native vector path, preserved the fused GDN 4D state fast path, restored the D512 flash-attention selector, and added CPU f16 `out_prod` fallback support.
+- Preserved Gemma3 full image chunks, Gemma multimodal precision/profiling hooks where still relevant, and flat-DFlash multimodal compatibility while keeping tree and non-DFlash speculation disabled under multimodal where unsupported.
+- Suppressed leading reasoning/thinking syntax in streamed title generation so session titles do not surface stray tags such as closing thinking markers.
+- Preserved the reasoning loop guard, malformed tool-call filtering, request-level speculative overrides, and DFlash/mmproj server guardrails on the newer upstream server.
+- Brought in upstream server/runtime improvements after v0.2.0, including draft/MTP resource cleanup on sleep, prompt token counts in `/slots`, router and model metadata fixes, API compatibility updates, and newer built-in server tooling.
+- Brought in upstream conversion, UI/app, Docker, CI, backend, model, tokenizer, and documentation updates from the newer llama.cpp base while keeping BeeLlama-specific docs and workflow metadata.
+- Expanded parser and DFlash plumbing tests for removed args, DFlash default normalization, DFlash-only no-op behavior, auto-detect preservation, multi-GPU policy helpers, per-layer capture/tape allocation, device-aware replay, CUDA device restoration, and adaptive Draft-Max behavior.
+
 ## v0.2.0
 
 - Added compatibility with upstream DFlash PR drafter GGUFs that use `general.architecture = dflash`. Bee now keeps this separate from the older `dflash-draft` schema, understands upstream metadata keys such as `dflash.block_size` and `dflash.target_layer_ids`, reads upstream tensor names, and keeps existing Bee/buun draft GGUF naming intact.

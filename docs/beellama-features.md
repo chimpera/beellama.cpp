@@ -11,7 +11,7 @@ BeeLlama's practical advantage is combination. Public llama.cpp has the main run
 - Modern llama.cpp base: GGUF model loading, `llama-server`, OpenAI-compatible HTTP endpoints, chat templates, reasoning output handling, sampling controls, multimodal projector loading, prompt caching, context checkpoints, unified KV, continuous batching, GPU offload, Flash Attention selection, and the upstream speculative backends that still apply.
 - DFlash draft architecture: both Bee/buun `dflash-draft` and upstream-style `dflash` draft GGUF support, target hidden-state capture, a 4096-token per-layer CPU ring, a configurable DFlash cross-attention window, and a DFlash drafter context shared across server slots.
 - DFlash server execution: explicit `--spec-type dflash`, automatic DFlash detection for DFlash draft GGUFs, flat verification with `--spec-branch-budget 0`, tree verification with positive `--spec-branch-budget`, slot capping with `--spec-dflash-max-slots`, and request-time speculative overrides.
-- DDTree controls: Bee uses branch-only budgeting through `--spec-branch-budget`. Public buun's `--tree-budget` is still accepted for compatibility, but Bee converts it to branch nodes beyond the main draft path after parsing.
+- DDTree controls: Bee uses branch-only budgeting through `--spec-branch-budget`. Public buun's total-node `--tree-budget` spelling is not accepted in `v0.3.0`; use explicit branch nodes beyond the main draft path.
 - Adaptive Draft-Max: DFlash draft depth is not just a fixed `--spec-draft-n-max`. Bee adds server-side `profit` and `fringe` controllers with `--spec-dm-*` args, probe cycles, off dwell, EWMA stats, and continuation-state preservation.
 - Sampled DFlash verification: `--spec-draft-temp` supports greedy drafting, explicit positive drafter temperature, and `auto` mirroring of target sampling temperature. The rejection-sampling path is conditional on draft temperature, target temperature, and draft log-probability availability.
 - Model-free speculation: CopySpec, suffix-tree speculation, recycle speculation, and ngram variants remain available as separate `--spec-type` modes for repeated-context and no-draft-model workloads.
@@ -38,8 +38,8 @@ BeeLlama's practical advantage is combination. Public llama.cpp has the main run
 | DFlash cross window | No | No | Fixed `LLAMA_DFLASH_PER_SLOT_CTX = 512` at checked ref | `--spec-dflash-cross-ctx`, default `512` |
 | DFlash slot cap | No | No | `--dflash-max-slots` | `--spec-dflash-max-slots` |
 | Flat DFlash | No | No | Yes | Yes |
-| Tree DFlash/DDTree | No | No | Yes, total-node `--tree-budget` | Yes, branch-only `--spec-branch-budget` plus legacy conversion |
-| Draft top-k for DFlash tree | No | No | `--draft-topk` | `--spec-draft-top-k`, legacy `--draft-topk` accepted |
+| Tree DFlash/DDTree | No | No | Yes, total-node `--tree-budget` | Yes, branch-only `--spec-branch-budget` |
+| Draft top-k for DFlash tree | No | No | `--draft-topk` | `--spec-draft-top-k` |
 | Adaptive DFlash depth | No | No | Speculative-code adaptive tracking | Server-side `profit` and `fringe` controllers with `--spec-dm-*` CLI |
 | Sampled DFlash CLI | No | No | No checked CLI surface for draft temperature | `--spec-draft-temp 0`, positive value, or `auto` |
 | Multi-slot DFlash | No | No | Shared DFlash slot machinery | Shared drafter context, slot cap, and flat batched drafting |
@@ -75,7 +75,7 @@ On `v0.3.0`, DFlash GPU capture/tape is also enabled by default for split CUDA/R
 
 The accept path (rollback, state restore, and DeltaNet replay after token acceptance or rejection) uses batched asynchronous GPU-to-GPU copies and a direct CUDA GDN state-replay kernel. This avoids per-layer synchronization and per-cycle ggml graph construction for the recurrent state update, keeping accept-side overhead small relative to target-model verification time.
 
-Public llama.cpp and public TheTom do not have the DFlash draft architecture or DFlash server path at the checked refs. Public buun does have DFlash. Bee's DFlash surface is more complete for server tuning because it adds canonical `--spec-*` names, configurable cross context, branch-only DDTree budgeting, sampled-drafter CLI control, adaptive draft controllers, request overrides, and multimodal flat-DFlash guardrails.
+Public llama.cpp and public TheTom do not have the DFlash draft architecture or DFlash server path at the checked refs. Public buun does have DFlash. Bee's DFlash surface is more complete for server tuning because it adds canonical `--spec-*` names, configurable cross context, branch-only DDTree budgeting, sampled-drafter CLI control, adaptive draft controllers, request overrides, and multimodal flat-DFlash guardrails. The raw upstream `--spec-draft-n-max` default remains `3`, while DFlash raises the effective omitted default to `16` after explicit `--spec-type dflash` or DFlash draft-model auto-detection.
 
 ### DFlash Drafting Performance
 
@@ -112,7 +112,7 @@ Bee supports flat DFlash and tree-shaped DFlash verification:
 --spec-draft-p-split 0.1 # probability threshold for branch creation
 ```
 
-The important distinction is that `--spec-draft-n-max` controls main-path draft length, while `--spec-branch-budget` controls extra branch nodes. In public buun, `--tree-budget` is a total DDTree node budget. Bee still accepts `--tree-budget TOTAL`, then converts it to `max(0, TOTAL - draft_max)` unless `--spec-branch-budget` was also supplied. If both are supplied, Bee uses `--spec-branch-budget` and warns that the legacy value was ignored.
+The important distinction is that `--spec-draft-n-max` controls main-path draft length, while `--spec-branch-budget` controls extra branch nodes. In public buun, `--tree-budget` is a total DDTree node budget. Bee `v0.3.0` removed that CLI compatibility spelling so commands use one branch-only concept.
 
 Flat mode forces `--spec-draft-top-k` back to `1`, because there are no branch alternatives to verify when the branch budget is zero.
 
