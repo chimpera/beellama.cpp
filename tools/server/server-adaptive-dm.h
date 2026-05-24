@@ -632,10 +632,18 @@ struct server_adaptive_dm_state {
         }
 
         int recommended = best.n;
+        const bool estimated_demote =
+            best.estimated &&
+            best.n > 0 &&
+            best.n < current_n &&
+            current_ready;
         const bool baseline_wins =
             best.n == 0 ||
             (best.n > 0 && best.score < baseline_score * (1.0f + dm_profit_min));
-        if (baseline_ready && baseline_wins) {
+        if (estimated_demote && (!baseline_ready ||
+                    current_score >= baseline_score * (1.0f + dm_profit_min))) {
+            recommended = current_n;
+        } else if (baseline_ready && baseline_wins) {
             profit_consecutive_below_profit++;
             const bool disable_now = profit_consecutive_below_profit >= dm_off_dwell;
             recommended = disable_now ? 0 : current_n;

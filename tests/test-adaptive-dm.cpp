@@ -333,6 +333,28 @@ int main() {
         assert(recommended > 0);
     }
 
+    // Estimated lower-depth candidates are useful for upward exploration, but
+    // must not demote an active full-depth DFlash horizon before the lower
+    // horizon has direct timing evidence. Early Gemma DFlash cycles can have
+    // low tail acceptance and make shallower estimated candidates look better
+    // even though the full horizon wins after the request warms up.
+    {
+        server_adaptive_dm_state est;
+        est.dm_profit_min_samples = 3;
+        est.dm_profit_raise_margin = 0.01f;
+        est.dm_profit_lower_margin = 0.01f;
+        est.adaptive_n_max = 15;
+
+        est.observe_profit_acceptance(15, 2);
+        est.observe_profit_timing(15, 24.9f, 62.3f, 1.0f, 88.3f);
+        est.observe_profit_acceptance(15, 2);
+        est.observe_profit_timing(15, 6.9f, 64.3f, 1.1f, 72.3f);
+        est.observe_profit_acceptance(15, 1);
+        est.observe_profit_timing(15, 6.2f, 53.4f, 0.9f, 60.5f);
+
+        assert(est.decide_profit_n_max(15) == 15);
+    }
+
     // test baseline-best shuts speculation fully off after dwell instead of only downshifting
     {
         server_adaptive_dm_state weak;

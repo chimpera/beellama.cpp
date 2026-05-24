@@ -1481,6 +1481,16 @@ static int dflash_flat_effective_draft_max(llama_context * ctx_dft, int n_draft_
     return std::min(n_draft_max, block_size - 1);
 }
 
+static int dflash_effective_adaptive_base_n_max(
+        llama_context * ctx_dft,
+        const common_params_speculative & spec,
+        int base_n_max) {
+    if (spec.type() == COMMON_SPECULATIVE_TYPE_DFLASH && spec.branch_budget == 0) {
+        return dflash_flat_effective_draft_max(ctx_dft, base_n_max);
+    }
+    return base_n_max;
+}
+
 
 
 //
@@ -2752,7 +2762,9 @@ private:
         }
 
         if (slot.can_speculate() && task.need_sampling() && slot.dm_adaptive) {
-            const int base_n_max = common_speculative_n_max(slot.spec.get(), task.params.speculative);
+            const int configured_base_n_max = common_speculative_n_max(slot.spec.get(), task.params.speculative);
+            const int base_n_max = dflash_effective_adaptive_base_n_max(
+                    ctx_dft_shared.get(), task.params.speculative, configured_base_n_max);
             slot.reset_profit_if_config_changed(task.params.speculative, base_n_max,
                                                 (int32_t) slot.prompt.n_tokens());
         }
@@ -5831,7 +5843,9 @@ private:
                 return;
             }
 
-            const int base_n_max = common_speculative_n_max(slot.get_spec(), slot.task->params.speculative);
+            const int configured_base_n_max = common_speculative_n_max(slot.get_spec(), slot.task->params.speculative);
+            const int base_n_max = dflash_effective_adaptive_base_n_max(
+                    ctx_dft_shared.get(), slot.task->params.speculative, configured_base_n_max);
             const int prev_n_max = slot.adaptive_n_max;
             int recommended = slot.decide_profit_n_max(base_n_max);
 

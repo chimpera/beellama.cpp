@@ -1392,6 +1392,9 @@ int main(int argc, char ** argv) {
         "adaptive DFlash request state must reset on fresh LRU slots and canceled tasks");
     ok &= expect(server_context.find("slot.reset_profit_if_config_changed(task.params.speculative, base_n_max") != std::string::npos,
         "adaptive DFlash profit controller must refresh its config key when a task is launched");
+    ok &= expect(server_context.find("dflash_effective_adaptive_base_n_max") != std::string::npos &&
+                 server_context.find("const int base_n_max = dflash_effective_adaptive_base_n_max(") != std::string::npos,
+        "adaptive DFlash profit decisions must use the effective flat DFlash draft cap, not only the configured nominal max");
     ok &= expect(context_h.find("profile_reduced_logits_ids_us") != std::string::npos &&
                  context_cpp.find("GGML_DFLASH_PROFILE_SYNC_SPLIT") != std::string::npos &&
                  context_cpp.find("reduced_logits_ids=") != std::string::npos &&
