@@ -480,8 +480,9 @@ static bool task_result_should_suppress_leading_thinking_syntax(const common_cha
         return false;
     }
 
-    return task_result_generation_prompt_opens_thinking(params) ||
-           params.reasoning_format == COMMON_REASONING_FORMAT_NONE;
+    return params.reasoning_format == COMMON_REASONING_FORMAT_NONE &&
+           (task_result_generation_prompt_opens_thinking(params) ||
+            params.generation_prompt.empty());
 }
 
 static bool task_result_generated_still_in_prefilled_close_tag(

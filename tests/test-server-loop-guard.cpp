@@ -168,11 +168,39 @@ static void test_task_result_state_suppresses_leading_thinking_block_without_pre
     assert(diffs[0].content_delta == "Session title");
 }
 
+static void test_task_result_state_streams_forced_open_reasoning() {
+    const std::string think_start = "<think>";
+    const std::string think_end = "</think>";
+
+    common_chat_parser_params parser_params;
+    parser_params.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+    parser_params.generation_prompt = think_start;
+    parser_params.thinking_start_tag = think_start;
+    parser_params.thinking_end_tag = think_end;
+    parser_params.parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+        auto reasoning = p.optional(think_start + p.reasoning(p.until(think_end)) + think_end + p.space());
+        return p.sequence({ reasoning, p.content(p.rest()), p.end() });
+    });
+
+    task_result_state state(parser_params);
+    std::vector<common_chat_msg_diff> diffs;
+
+    const std::string generated_reasoning = "internal reasoning";
+    state.update_chat_msg(generated_reasoning, true, diffs, false);
+
+    assert(state.chat_msg.reasoning_content == generated_reasoning);
+    assert(state.chat_msg.content.empty());
+    assert(diffs.size() == 1);
+    assert(diffs[0].reasoning_content_delta == generated_reasoning);
+    assert(diffs[0].content_delta.empty());
+}
+
 int main() {
     test_task_result_state_suppresses_prefilled_thinking_close_tag();
     test_task_result_state_suppresses_generated_thinking_block_in_content_mode();
     test_task_result_state_suppresses_prefilled_open_thinking_content();
     test_task_result_state_suppresses_leading_thinking_block_without_prefill();
+    test_task_result_state_streams_forced_open_reasoning();
 
     {
         server_loop_guard guard(test_params());
