@@ -300,6 +300,8 @@ int main(int argc, char ** argv) {
         "DFlash accepted-prefix full-KV commits must clamp to the drafter prefix window so small -cd stays safe");
     ok &= expect(context_cpp.find("base_kv->seq_rm(seq_id, start_pos, -1);") != std::string::npos,
         "DFlash accepted-prefix full-KV commits must replace only the tail suffix instead of overwriting occupied base-KV cells in place");
+    ok &= expect(speculative.find("if (has_dflash) {\n            if (!has_copyspec)") == std::string::npos,
+        "DFlash must not implicitly stack CopySpec when --spec-type dflash is requested");
     ok &= expect(context_cpp.find("reuse_update_buf &&\n            dflash_kv_cache &&\n            dflash_kv_cache->fn_wait_backend_stream &&\n            dflash_kv_cache->fn_wait_backend_stream(gpu_backend)") != std::string::npos,
         "DFlash accepted-prefix full-KV commits must stream-order reused GPU scratch before the next commit reuses update_buf");
     ok &= expect(kv_cache_iswa_cpp.find("return std::max(kv_base->seq_pos_max(seq_id), kv_swa->seq_pos_max(seq_id));") != std::string::npos,
