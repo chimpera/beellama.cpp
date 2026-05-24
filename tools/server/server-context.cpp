@@ -2244,7 +2244,7 @@ private:
 
         const bool can_spec = (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO);
 
-        // DFlash multi-slot: --dflash-max-slots caps how many server slots keep DFlash state;
+        // DFlash multi-slot: --spec-dflash-max-slots caps how many server slots keep DFlash state;
         // slots above the cap fall back to non-speculative decode (slot.spec stays null). The
         // matching tape/hidden buffers are allocated after the per-slot init loop (set_dflash_capture
         // runs inside common_speculative_init for slot 0, so dflash_capture must exist first).

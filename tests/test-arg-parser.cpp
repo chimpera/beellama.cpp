@@ -120,6 +120,21 @@ int main(void) {
     argv = {"binary_name", "--spec-dflash-default"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
 
+    argv = {"binary_name", "--dflash-max-slots", "1"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
+    argv = {"binary_name", "--draft-topk", "4"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
+    argv = {"binary_name", "--draft-model", "draft.gguf"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
+    argv = {"binary_name", "--spec-replace", "TARGET", "DRAFT"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
+    argv = {"binary_name", "--spec-draft-replace", "TARGET", "DRAFT"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
     // negated arg
     argv = {"binary_name", "--no-mmap"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));

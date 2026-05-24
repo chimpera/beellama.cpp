@@ -332,8 +332,6 @@ struct common_params_speculative_draft {
     // fork: drafter context size override (0 = use model default)
     int32_t n_ctx = 0;
 
-    // fork: string replacements for cross-model compat
-    std::vector<std::pair<std::string, std::string>> replacements;
 };
 
 struct common_params_speculative_ngram_mod {

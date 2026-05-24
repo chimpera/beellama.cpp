@@ -3717,7 +3717,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_BRANCH_BUDGET"));
     add_opt(common_arg(
-        {"--spec-dflash-max-slots", "--dflash-max-slots"}, "N",
+        {"--spec-dflash-max-slots"}, "N",
         "max concurrent server slots with DFlash state; higher slots fall back to non-speculative decode (default: match -np)",
         [](common_params & params, int value) {
             params.speculative.dflash_max_slots = std::max(0, value);
@@ -3733,7 +3733,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_SPECULATIVE}).set_env("LLAMA_ARG_SPEC_DFLASH_CROSS_CTX"));
     add_opt(common_arg(
-        {"--spec-draft-top-k", "--draft-topk"}, "N",
+        {"--spec-draft-top-k"}, "N",
         string_format("top-K candidates per drafter position for tree branching (default: %d)", params.speculative.draft_topk),
         [](common_params & params, int value) {
             params.speculative.draft_topk = value;
@@ -4038,19 +4038,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_N_GPU_LAYERS_DRAFT"));
     add_opt(common_arg(
-        {"--spec-draft-model", "-md", "--model-draft", "--draft-model"}, "FNAME",
+        {"--spec-draft-model", "-md", "--model-draft"}, "FNAME",
         "draft model for speculative decoding (default: unused)",
         [](common_params & params, const std::string & value) {
             params.speculative.draft.mparams.path = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_MODEL"));
-    add_opt(common_arg(
-        {"--spec-draft-replace", "--spec-replace"}, "TARGET", "DRAFT",
-        "translate the string in TARGET into DRAFT if the draft model and main model are not compatible",
-        [](common_params & params, const std::string & tgt, const std::string & dft) {
-            params.speculative.draft.replacements.push_back({ tgt, dft });
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
         {"--spec-type"}, common_speculative_all_types_str(),
         string_format("comma-separated list of types of speculative decoding to use (default: %s)\n",
