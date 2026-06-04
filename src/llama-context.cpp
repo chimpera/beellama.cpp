@@ -170,14 +170,62 @@ static void dflash_log_backend_layout(
 
 static ggml_backend_t dflash_backend_for_dev(
         const std::vector<ggml_backend_ptr> & backends,
-        ggml_backend_dev_t want_dev) {
+        ggml_backend_dev_t want_dev,
+        bool allow_meta = false) {
     for (const auto & backend : backends) {
         auto * dev = ggml_backend_get_device(backend.get());
-        if (dev == want_dev && dflash_backend_dev_is_gpu(dev)) {
+        if (dev == want_dev && (dflash_backend_dev_is_gpu(dev) ||
+                (allow_meta && ggml_backend_dev_is_meta(dev)))) {
             return backend.get();
         }
     }
     return nullptr;
+}
+
+struct dflash_capture_backend {
+    ggml_backend_t     backend = nullptr;
+    ggml_backend_dev_t dev = nullptr;
+    bool               from_meta = false;
+};
+
+static dflash_capture_backend dflash_capture_backend_for_layer(
+        const std::vector<ggml_backend_ptr> & backends,
+        ggml_backend_dev_t layer_dev) {
+    dflash_capture_backend result;
+
+    result.backend = dflash_backend_for_dev(backends, layer_dev, layer_dev && ggml_backend_dev_is_meta(layer_dev));
+    if (result.backend) {
+        result.dev = layer_dev;
+        result.from_meta = layer_dev && ggml_backend_dev_is_meta(layer_dev);
+        return result;
+    }
+
+    if (!layer_dev || !ggml_backend_dev_is_meta(layer_dev)) {
+        return result;
+    }
+
+    const size_t n_devs = ggml_backend_meta_dev_n_devs(layer_dev);
+    for (size_t i = 0; i < n_devs; ++i) {
+        ggml_backend_dev_t simple_dev = ggml_backend_meta_dev_simple_dev(layer_dev, i);
+        result.backend = dflash_backend_for_dev(backends, simple_dev);
+        if (result.backend) {
+            result.dev = simple_dev;
+            result.from_meta = true;
+            return result;
+        }
+    }
+
+    return result;
+}
+
+static bool dflash_tensor_buffer_is_meta(const ggml_tensor * tensor) {
+    if (!tensor || !tensor->buffer) {
+        return false;
+    }
+
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(tensor->buffer);
+    ggml_backend_dev_t dev = buft ? ggml_backend_buft_get_device(buft) : nullptr;
+    return ggml_backend_dev_is_meta(dev);
 }
 
 static void dflash_capture_add_wait_backend(
@@ -2161,8 +2209,8 @@ void llama_context::allocate_tape_gpu(int n_slots, int max_tokens) {
         for (int li = 0; li < n_rec; ++li) {
             const int il = rec_ids[li];
             ggml_backend_dev_t layer_dev = model.dev_layer(il);
-            ggml_backend_t layer_backend = dflash_backend_for_dev(backends, layer_dev);
-            if (!layer_backend) {
+            const dflash_capture_backend capture_backend = dflash_capture_backend_for_layer(backends, layer_dev);
+            if (!capture_backend.backend) {
                 LLAMA_LOG_WARN("%s: no GPU backend for recurrent layer %d device %s; falling back to CPU tape\n",
                     __func__, il, layer_dev ? ggml_backend_dev_name(layer_dev) : "<null>");
                 dflash_capture->tapes.clear();
@@ -2193,29 +2241,29 @@ void llama_context::allocate_tape_gpu(int n_slots, int max_tokens) {
             tl.qkv  = ggml_new_tensor_2d(tape_ctx, GGML_TYPE_F32, conv_ch, (int64_t)max_tokens);
 
             tl.ctx = tape_ctx;
-            tl.dev = layer_dev;
-            tl.buf = ggml_backend_alloc_ctx_tensors(tape_ctx, layer_backend);
+            tl.dev = capture_backend.dev;
+            tl.buf = ggml_backend_alloc_ctx_tensors(tape_ctx, capture_backend.backend);
 
             if (!tl.buf) {
                 LLAMA_LOG_WARN("%s: failed to allocate GPU tape buffer for slot %d layer %d device %s, falling back to CPU tape\n",
-                    __func__, slot, il, layer_dev ? ggml_backend_dev_name(layer_dev) : "<null>");
+                    __func__, slot, il, capture_backend.dev ? ggml_backend_dev_name(capture_backend.dev) : "<null>");
                 dflash_capture->tapes.clear();
                 return;
             }
 
-            dflash_capture_add_wait_backend(*dflash_capture, layer_backend, ggml_backend_dev_backend_reg(layer_dev));
+            dflash_capture_add_wait_backend(*dflash_capture, capture_backend.backend, ggml_backend_dev_backend_reg(capture_backend.dev));
             total_size += ggml_backend_buffer_get_size(tl.buf);
 
             bool found = false;
             for (auto & dc : dev_counts) {
-                if (dc.dev == layer_dev) {
+                if (dc.dev == capture_backend.dev) {
                     ++dc.count;
                     found = true;
                     break;
                 }
             }
             if (!found) {
-                dev_counts.push_back({ layer_dev, 1 });
+                dev_counts.push_back({ capture_backend.dev, 1 });
             }
         }
 
@@ -2275,8 +2323,8 @@ void llama_context::allocate_hidden_gpu(int n_slots, int max_tokens) {
         for (int i = 0; i < n_layers; ++i) {
             const int il = dflash_capture->layer_ids[i];
             ggml_backend_dev_t layer_dev = model.dev_layer(il);
-            ggml_backend_t layer_backend = dflash_backend_for_dev(backends, layer_dev);
-            if (!layer_backend) {
+            const dflash_capture_backend capture_backend = dflash_capture_backend_for_layer(backends, layer_dev);
+            if (!capture_backend.backend) {
                 LLAMA_LOG_WARN("%s: no GPU backend for hidden layer %d device %s; using callback hidden fallback\n",
                     __func__, il, layer_dev ? ggml_backend_dev_name(layer_dev) : "<null>");
                 dflash_capture->hidden_gpu.clear();
@@ -2296,7 +2344,7 @@ void llama_context::allocate_hidden_gpu(int n_slots, int max_tokens) {
 
             hidden->layers[i] = ggml_new_tensor_2d(hidden_ctx, GGML_TYPE_F32, n_embd, (int64_t) max_tokens);
 
-            ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(hidden_ctx, layer_backend);
+            ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(hidden_ctx, capture_backend.backend);
             if (!buf) {
                 LLAMA_LOG_WARN("%s: failed to allocate GPU hidden buffer for slot %d layer %d; using callback hidden fallback\n",
                     __func__, slot, il);
@@ -2304,7 +2352,7 @@ void llama_context::allocate_hidden_gpu(int n_slots, int max_tokens) {
                 return;
             }
             hidden->bufs.push_back(buf);
-            dflash_capture_add_wait_backend(*dflash_capture, layer_backend, ggml_backend_dev_backend_reg(layer_dev));
+            dflash_capture_add_wait_backend(*dflash_capture, capture_backend.backend, ggml_backend_dev_backend_reg(capture_backend.dev));
             total_size += ggml_backend_buffer_get_size(buf);
         }
 
@@ -2361,8 +2409,8 @@ bool llama_context::allocate_prefill_gpu(int n_slots, int max_tokens) {
         for (int i = 0; i < n_layers; ++i) {
             const int il = dflash_capture->layer_ids[i];
             ggml_backend_dev_t layer_dev = model.dev_layer(il);
-            ggml_backend_t layer_backend = dflash_backend_for_dev(backends, layer_dev);
-            if (!layer_backend) {
+            const dflash_capture_backend capture_backend = dflash_capture_backend_for_layer(backends, layer_dev);
+            if (!capture_backend.backend) {
                 LLAMA_LOG_WARN("%s: no GPU backend for prefill layer %d device %s; using callback fallback\n",
                     __func__, il, layer_dev ? ggml_backend_dev_name(layer_dev) : "<null>");
                 dflash_capture->prefill_gpu.clear();
@@ -2384,7 +2432,7 @@ bool llama_context::allocate_prefill_gpu(int n_slots, int max_tokens) {
 
             hidden->layers[i] = ggml_new_tensor_2d(hidden_ctx, GGML_TYPE_F32, n_embd, (int64_t) max_tokens);
 
-            ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(hidden_ctx, layer_backend);
+            ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(hidden_ctx, capture_backend.backend);
             if (!buf) {
                 LLAMA_LOG_WARN("%s: failed to allocate prefill GPU buffer for slot %d layer %d; using callback fallback\n",
                     __func__, slot, il);
@@ -2393,7 +2441,7 @@ bool llama_context::allocate_prefill_gpu(int n_slots, int max_tokens) {
                 return false;
             }
             hidden->bufs.push_back(buf);
-            dflash_capture_add_wait_backend(*dflash_capture, layer_backend, ggml_backend_dev_backend_reg(layer_dev));
+            dflash_capture_add_wait_backend(*dflash_capture, capture_backend.backend, ggml_backend_dev_backend_reg(capture_backend.dev));
             total_size += ggml_backend_buffer_get_size(buf);
         }
 
@@ -8792,7 +8840,8 @@ bool llama_context::cross_ring_gpu_write_hidden(void * handle, int layer, int ri
     }
 
     auto * tensor = hgpu->layers[layer];
-    if (!tensor || !tensor->data) {
+    const bool tensor_is_meta = dflash_tensor_buffer_is_meta(tensor);
+    if (!tensor || !tensor->buffer || (!tensor_is_meta && !tensor->data)) {
         return false;
     }
     if (!dflash_gpu_hidden_span_in_bounds(tensor, src_offset, n_tokens, n_embd, __func__)) {
@@ -8801,15 +8850,17 @@ bool llama_context::cross_ring_gpu_write_hidden(void * handle, int layer, int ri
 
     auto * h = (dflash_cross_ring_handle *)handle;
     const size_t src_offset_bytes = (size_t) src_offset * (size_t) n_embd * sizeof(float);
-    const void * src = (const char *) tensor->data + src_offset_bytes;
-    if (h->fn_write_d2d(h->gpu_ring, layer, ring_pos, src, n_tokens, n_embd)) {
-        return true;
+    if (!tensor_is_meta) {
+        const void * src = (const char *) tensor->data + src_offset_bytes;
+        if (h->fn_write_d2d(h->gpu_ring, layer, ring_pos, src, n_tokens, n_embd)) {
+            return true;
+        }
     }
 
     static bool warned_d2h_fallback = false;
     if (!warned_d2h_fallback) {
-        LLAMA_LOG_WARN("%s: GPU hidden D2D ring write unavailable; falling back to GPU readback + H2D ring upload\n",
-            __func__);
+        LLAMA_LOG_WARN("%s: GPU hidden D2D ring write unavailable%s; falling back to backend readback + H2D ring upload\n",
+            __func__, tensor_is_meta ? " for Meta capture tensor" : "");
         warned_d2h_fallback = true;
     }
 
@@ -8843,7 +8894,8 @@ bool llama_context::prefill_gpu_write_hidden(void * handle, int slot, int layer,
     }
 
     auto * tensor = pgpu->layers[layer];
-    if (!tensor || !tensor->data) {
+    const bool tensor_is_meta = dflash_tensor_buffer_is_meta(tensor);
+    if (!tensor || !tensor->buffer || (!tensor_is_meta && !tensor->data)) {
         return false;
     }
     if (!dflash_gpu_hidden_span_in_bounds(tensor, src_offset, n_tokens, n_embd, __func__)) {
@@ -8852,15 +8904,17 @@ bool llama_context::prefill_gpu_write_hidden(void * handle, int slot, int layer,
 
     auto * h = (dflash_cross_ring_handle *)handle;
     const size_t src_offset_bytes = (size_t) src_offset * (size_t) n_embd * sizeof(float);
-    const void * src = (const char *) tensor->data + src_offset_bytes;
-    if (h->fn_write_d2d(h->gpu_ring, layer, ring_pos, src, n_tokens, n_embd)) {
-        return true;
+    if (!tensor_is_meta) {
+        const void * src = (const char *) tensor->data + src_offset_bytes;
+        if (h->fn_write_d2d(h->gpu_ring, layer, ring_pos, src, n_tokens, n_embd)) {
+            return true;
+        }
     }
 
     static bool warned_prefill_d2h_fallback = false;
     if (!warned_prefill_d2h_fallback) {
-        LLAMA_LOG_WARN("%s: prefill GPU D2D ring write unavailable; falling back to GPU readback + H2D ring upload\n",
-            __func__);
+        LLAMA_LOG_WARN("%s: prefill GPU D2D ring write unavailable%s; falling back to backend readback + H2D ring upload\n",
+            __func__, tensor_is_meta ? " for Meta capture tensor" : "");
         warned_prefill_d2h_fallback = true;
     }
 

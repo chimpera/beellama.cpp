@@ -22,6 +22,16 @@ struct ggml_backend_buft_comparator {
         return strcmp(ggml_backend_buft_name(lhs), ggml_backend_buft_name(rhs)) < 0;
     }
 };
+
+static bool llama_recurrent_tensor_is_meta(const ggml_tensor * tensor) {
+    if (!tensor || !tensor->buffer) {
+        return false;
+    }
+
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(tensor->buffer);
+    ggml_backend_dev_t dev = buft ? ggml_backend_buft_get_device(buft) : nullptr;
+    return ggml_backend_dev_is_meta(dev);
+}
 } // namespace
 
 //
@@ -663,29 +673,37 @@ void llama_memory_recurrent::copy_cell(int32_t i_src, int32_t i_dst) {
     };
     ggml_context * ctx = ggml_init(params);
 
+    std::vector<uint8_t> row_data;
+    auto copy_tensor_row = [&](ggml_tensor * tensor, uint32_t n_embd) {
+        if (!tensor) {
+            return;
+        }
+
+        const size_t row_bytes = ggml_row_size(tensor->type, n_embd);
+        const size_t src_offset = (size_t) i_src * row_bytes;
+        const size_t dst_offset = (size_t) i_dst * row_bytes;
+        GGML_ASSERT(src_offset + row_bytes <= ggml_nbytes(tensor));
+        GGML_ASSERT(dst_offset + row_bytes <= ggml_nbytes(tensor));
+
+        if (llama_recurrent_tensor_is_meta(tensor)) {
+            row_data.resize(row_bytes);
+            ggml_backend_tensor_get(tensor, row_data.data(), src_offset, row_bytes);
+            ggml_backend_tensor_set(tensor, row_data.data(), dst_offset, row_bytes);
+        } else {
+            ggml_tensor * src_v = ggml_view_1d(ctx, tensor, n_embd, src_offset);
+            ggml_tensor * dst_v = ggml_view_1d(ctx, tensor, n_embd, dst_offset);
+            src_v->buffer = tensor->buffer;
+            dst_v->buffer = tensor->buffer;
+            ggml_backend_tensor_copy(src_v, dst_v);
+        }
+
+        profile.tensors_copied++;
+        profile.fallback_copies++;
+    };
+
     for (uint32_t il = 0; il < hparams.n_layer; ++il) {
-        if (r_l[il]) {
-            const uint32_t n_embd = hparams.n_embd_r();
-            size_t row_bytes = ggml_row_size(r_l[il]->type, n_embd);
-            ggml_tensor * src_v = ggml_view_1d(ctx, r_l[il], n_embd, i_src * row_bytes);
-            ggml_tensor * dst_v = ggml_view_1d(ctx, r_l[il], n_embd, i_dst * row_bytes);
-            src_v->buffer = r_l[il]->buffer;
-            dst_v->buffer = r_l[il]->buffer;
-            ggml_backend_tensor_copy(src_v, dst_v);
-            profile.tensors_copied++;
-            profile.fallback_copies++;
-        }
-        if (s_l[il]) {
-            const uint32_t n_embd = hparams.n_embd_s();
-            size_t row_bytes = ggml_row_size(s_l[il]->type, n_embd);
-            ggml_tensor * src_v = ggml_view_1d(ctx, s_l[il], n_embd, i_src * row_bytes);
-            ggml_tensor * dst_v = ggml_view_1d(ctx, s_l[il], n_embd, i_dst * row_bytes);
-            src_v->buffer = s_l[il]->buffer;
-            dst_v->buffer = s_l[il]->buffer;
-            ggml_backend_tensor_copy(src_v, dst_v);
-            profile.tensors_copied++;
-            profile.fallback_copies++;
-        }
+        copy_tensor_row(r_l[il], hparams.n_embd_r());
+        copy_tensor_row(s_l[il], hparams.n_embd_s());
     }
 
     ggml_free(ctx);

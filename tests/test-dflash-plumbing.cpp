@@ -85,11 +85,13 @@ int main(int argc, char ** argv) {
     const std::string graph_cpp = read_file(root + "/src/llama-graph.cpp");
     const std::string ggml_backend_cpp = read_file(root + "/ggml/src/ggml-backend.cpp");
     const std::string ggml_backend_meta = read_file(root + "/ggml/src/ggml-backend-meta.cpp");
+    const std::string memory_recurrent_cpp = read_file(root + "/src/llama-memory-recurrent.cpp");
     const std::string llama_h = read_file(root + "/include/llama.h");
     const std::string llama_ext_h = read_file(root + "/src/llama-ext.h");
     const std::string sampling_h = read_file(root + "/common/sampling.h");
     const std::string sampling_cpp = read_file(root + "/common/sampling.cpp");
     const std::string ggml_h = read_file(root + "/ggml/include/ggml.h");
+    const std::string ggml_backend_h = read_file(root + "/ggml/include/ggml-backend.h");
     const std::string ggml_common_h = read_file(root + "/ggml/src/ggml-common.h");
     const std::string ggml_c = read_file(root + "/ggml/src/ggml.c");
     const std::string ggml_quants_h = read_file(root + "/ggml/src/ggml-quants.h");
@@ -293,6 +295,29 @@ int main(int argc, char ** argv) {
                  ggml_backend_meta.find("const size_t simple_offset = i_start * chunk_size_j;") != std::string::npos &&
                  ggml_backend_meta.find("ggml_backend_tensor_get_2d_async(simple_backend, simple_tensor") != std::string::npos,
         "Meta backend tensor reads must allow nonzero offsets for split compact outputs");
+    ok &= expect(ggml_backend_meta.find("handle_turbo_wht") != std::string::npos &&
+                 ggml_backend_meta.find("turbo_wht_split_axis_ne") != std::string::npos &&
+                 ggml_backend_meta.find("case GGML_OP_TURBO_WHT:") != std::string::npos,
+        "Meta backend split-state propagation must support TurboQuant WHT for tensor-split Turbo/TCQ cache graphs");
+    ok &= expect(ggml_backend_h.find("ggml_backend_dev_is_meta") != std::string::npos &&
+                 ggml_backend_h.find("ggml_backend_meta_dev_n_devs") != std::string::npos &&
+                 ggml_backend_h.find("ggml_backend_meta_dev_simple_dev") != std::string::npos &&
+                 ggml_backend_meta.find("bool ggml_backend_dev_is_meta") != std::string::npos &&
+                 ggml_backend_meta.find("ggml_backend_dev_t ggml_backend_meta_dev_simple_dev") != std::string::npos &&
+                 context_cpp.find("dflash_capture_backend_for_layer") != std::string::npos &&
+                 context_cpp.find("allow_meta && ggml_backend_dev_is_meta(dev)") != std::string::npos &&
+                 context_cpp.find("ggml_backend_meta_dev_simple_dev(layer_dev") != std::string::npos &&
+                 context_cpp.find("capture_backend.backend") != std::string::npos,
+        "DFlash tensor-split capture must allocate through the active Meta backend and retain simple-device fallback introspection");
+    ok &= expect(context_cpp.find("dflash_tensor_buffer_is_meta") != std::string::npos &&
+                 context_cpp.find("if (!tensor_is_meta)") != std::string::npos &&
+                 context_cpp.find("ggml_backend_tensor_get(tensor, staging.data(), src_offset_bytes, n_bytes);") != std::string::npos,
+        "DFlash GPU ring writes must avoid pointer-based D2D from Meta capture tensors and use backend readback fallback");
+    ok &= expect(memory_recurrent_cpp.find("llama_recurrent_tensor_is_meta") != std::string::npos &&
+                 memory_recurrent_cpp.find("ggml_backend_dev_is_meta(dev)") != std::string::npos &&
+                 memory_recurrent_cpp.find("ggml_backend_tensor_get(tensor, row_data.data(), src_offset, row_bytes);") != std::string::npos &&
+                 memory_recurrent_cpp.find("ggml_backend_tensor_set(tensor, row_data.data(), dst_offset, row_bytes);") != std::string::npos,
+        "DFlash recurrent backup must copy Meta-backed recurrent rows through backend get/set instead of view pointer copies");
     ok &= expect(cuda_cpp.find("dflash_cuda_backend_wait_for_stream") != std::string::npos,
         "CUDA backend must expose an event wait from GGML compute stream to DFlash per-thread stream");
     ok &= expect(cuda_cpp.find("thread_local cudaEvent_t dflash_wait_events") != std::string::npos,
@@ -876,6 +901,12 @@ int main(int argc, char ** argv) {
     ok &= expect(graph_cpp.find("skip_logits_output") != std::string::npos &&
                  graph_cpp.find("dflash_reduced_consumer_active && t_logits_argmax != nullptr") != std::string::npos,
         "reduced verifier graphs must not keep full raw logits as graph outputs when compact logits are consumed");
+    ok &= expect(dflash_draft.find("if (cparams.dflash_reduced_consumer_active)") != std::string::npos &&
+                 dflash_draft.find("ggml_build_forward_expand(gf, cur);") != std::string::npos &&
+                 speculative.find("llama_model_dev_output(params.model_dft)") != std::string::npos &&
+                 speculative.find("draft backend sampling disabled on Meta output placement") != std::string::npos &&
+                 speculative.find("llama_set_dflash_consume_reduced(ctx_dft, draft_reduced_logits)") != std::string::npos,
+        "DFlash drafter compact argmax/top-k must fall back to full logits on Meta output placement");
     ok &= expect(context_cpp.find("dflash_reduced_logits_only") != std::string::npos &&
                  context_cpp.find("has_logits = !dflash_reduced_logits_only") != std::string::npos,
         "reduced verifier decode must avoid reserving a raw logits CPU output buffer");
@@ -2071,14 +2102,22 @@ int main(int argc, char ** argv) {
                  server_context.find("params_dft.main_gpu = 0;") != std::string::npos &&
                  server_context.find("const bool dflash_auto_device_mismatch") != std::string::npos &&
                  server_context.find("const bool dflash_auto_single_gpu_reload") != std::string::npos &&
-                 server_context.find("target_output_is_gpu && dflash_auto_device_mismatch") != std::string::npos &&
+                 server_context.find("target_output_is_gpu &&") != std::string::npos &&
+                 server_context.find("dflash_auto_device_mismatch") != std::string::npos &&
                  server_context.find("DFlash draft model uses shared target output tensor on device") != std::string::npos,
         "DFlash draft auto-placement must include the target output device used by shared tensors");
     ok &= expect(server_context.find("server_backend_dev_is_dflash_shared_output_compatible") != std::string::npos &&
                  server_context.find("GGML_BACKEND_DEVICE_TYPE_META") != std::string::npos &&
                  server_context.find("const bool target_output_is_meta") != std::string::npos &&
+                 server_context.find("DFlash draft model will use tensor-split placement with target Meta output") != std::string::npos &&
                  server_context.find("params_dft.split_mode = LLAMA_SPLIT_MODE_TENSOR;") != std::string::npos &&
-                 server_context.find("server_model_supports_device_buffer(model_dft.get(), target_output_dev)") != std::string::npos,
+                 server_context.find("params_dft.devices = params_base.devices;") != std::string::npos &&
+                 server_context.find("server_model_supports_device_buffer(model_dft.get(), target_output_dev)") != std::string::npos &&
+                 server_context.find("target_output_is_meta &&\n                    !server_model_supports_device_buffer(model_dft.get(), target_output_dev)") != std::string::npos &&
+                 server_context.find("DFlash disabled for tensor-split target") == std::string::npos &&
+                 server_context.find("GGML_DFLASH_ALLOW_TENSOR_SPLIT") == std::string::npos &&
+                 server_context.find("DFlash on tensor-split target is EXPERIMENTAL") == std::string::npos &&
+                 server_context.find("draft_output_is_meta ||") == std::string::npos,
         "DFlash draft auto-placement must keep a tensor-split drafter when shared target tensors live in a Meta buffer");
     ok &= expect(llama_h.find("ggml_backend_dev_t output_device;") != std::string::npos &&
                  common_h.find("ggml_backend_dev_t output_device = nullptr;") != std::string::npos &&

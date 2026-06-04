@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.2
+
+- Fixed DFlash on target tensor-split / Meta placement. Auto-detected DFlash draft loading now keeps tensor-split placement when shared target output tensors live in a Meta buffer, instead of reloading the drafter onto one GPU and crashing during draft warmup. Explicit incompatible `--spec-draft-device` placement now fails closed with a direct diagnostic.
+- Added the Meta backend support needed by DFlash tensor-split runs: TurboQuant WHT split-state propagation, public Meta device introspection for capture placement, Meta-backed hidden/prefill capture allocation, Meta-safe GPU ring readback fallback, Meta-safe recurrent backup row copies, and a full-logits drafter fallback when compact argmax/top-k cannot run on Meta output.
+- Verified the single-RTX-3090 tensor-split crash proxy with DFlash enabled. Forced `-sm tensor` now completes and generates drafts; normal single-GPU DFlash remains on the fast CUDA path. The forced single-GPU tensor-split path is still a correctness fallback and is slower because recurrent backup and hidden-ring transfer avoid unsafe raw Meta pointers.
+
 ## v0.3.1
 
 - Merged latest upstream llama.cpp master. This pulls in Gemma 4 12B and Gemma 4 unified multimodal support fixes, including non-causal vision, unified audio/vision projector handling, and FPE fixes; Qwen3.5 post-norm hidden-state behavior for MTP; CUDA KV-cache quantization preallocation and PDL race fixes; WebGPU FlashAttention refactoring with standardized quantization support; CPU backend improvements for RVV/SVE; lower-latency Metal command-buffer status polling; Mermaid diagram rendering and preview support in `tools/ui`; updated BoringSSL, SYCL documentation, save/load-state tests, Docker docs, and small CI/release maintenance.

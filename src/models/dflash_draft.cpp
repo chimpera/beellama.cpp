@@ -1085,18 +1085,23 @@ llm_build_dflash_draft::llm_build_dflash_draft(
     cb(cur, "result_output", -1);
     res->t_logits = cur;
 
-    // GPU top-K or argmax — avoids 15.9MB logits transfer + CPU scan for DFlash draft
-    const float sample_temp = cparams.dflash_sample_temp;
-    static std::atomic<uint64_t> gumbel_counter{1};
-    const uint64_t seed = (sample_temp > 0.0f) ? gumbel_counter.fetch_add(1) : 0;
-    const int topk = cparams.dflash_topk;
-    if (topk > 1) {
-        res->t_logits_argmax = ggml_topk_ext(ctx0, cur, topk, sample_temp, seed);
-    } else {
-        res->t_logits_argmax = ggml_argmax_ext(ctx0, cur, sample_temp, seed);
-    }
+    if (cparams.dflash_reduced_consumer_active) {
+        // GPU top-K or argmax avoids full-logits transfer for DFlash draft when
+        // the output placement can execute a compact vocab reduction locally.
+        const float sample_temp = cparams.dflash_sample_temp;
+        static std::atomic<uint64_t> gumbel_counter{1};
+        const uint64_t seed = (sample_temp > 0.0f) ? gumbel_counter.fetch_add(1) : 0;
+        const int topk = cparams.dflash_topk;
+        if (topk > 1) {
+            res->t_logits_argmax = ggml_topk_ext(ctx0, cur, topk, sample_temp, seed);
+        } else {
+            res->t_logits_argmax = ggml_argmax_ext(ctx0, cur, sample_temp, seed);
+        }
 
-    ggml_build_forward_expand(gf, res->t_logits_argmax);
+        ggml_build_forward_expand(gf, res->t_logits_argmax);
+    } else {
+        ggml_build_forward_expand(gf, cur);
+    }
 }
 
 llm_build_dflash_kv_update::llm_build_dflash_kv_update(

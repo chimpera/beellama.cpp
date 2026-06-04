@@ -4296,6 +4296,14 @@ llama_context * common_speculative_create_ctx_dft(const common_params_speculativ
     if (params.sample_temp > 0.0f) {
         llama_set_dflash_sample_temp(ctx_dft, params.sample_temp);
     }
+    bool draft_reduced_logits = params.draft.backend_sampling;
+    ggml_backend_dev_t draft_output_dev = llama_model_dev_output(params.model_dft);
+    if (draft_output_dev && ggml_backend_dev_type(draft_output_dev) == GGML_BACKEND_DEVICE_TYPE_META) {
+        draft_reduced_logits = false;
+        LOG_WRN("%s",
+                "dflash: draft backend sampling disabled on Meta output placement; using full-logits fallback\n");
+    }
+    llama_set_dflash_consume_reduced(ctx_dft, draft_reduced_logits);
 
     // warmup the draft context
     {
