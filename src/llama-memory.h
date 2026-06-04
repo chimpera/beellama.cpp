@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <functional>
+#include <vector>
 
 struct llama_ubatch;
 
@@ -156,6 +157,12 @@ struct llama_memory_i {
     // DFlash: force per-seq ubatch splits so each ubatch carries exactly one slot's tokens.
     // Default no-op; hybrid memories override.
     virtual void set_force_split_seq(bool /*v*/) {}
+
+    // KV-cache-compatible hooks used by composite memories such as hybrid and iSWA.
+    // Non-KV memory types keep the defaults and should not be used as attention memory.
+    virtual uint32_t get_kv_n_stream() const { return 0; }
+    virtual uint32_t get_kv_size() const { return 0; }
+    virtual llama_memory_context_ptr init_kv_batch(const std::vector<llama_ubatch> & /* ubatches */) { return nullptr; }
 };
 
 using llama_memory_ptr = std::unique_ptr<llama_memory_i>;

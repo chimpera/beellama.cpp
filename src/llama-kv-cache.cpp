@@ -909,6 +909,23 @@ llama_memory_context_ptr llama_kv_cache::init_update(llama_context * lctx, bool 
     return std::make_unique<llama_kv_cache_context>(this, lctx, do_shift, std::move(sc_info));
 }
 
+uint32_t llama_kv_cache::get_kv_n_stream() const {
+    return get_n_stream();
+}
+
+uint32_t llama_kv_cache::get_kv_size() const {
+    return get_size();
+}
+
+llama_memory_context_ptr llama_kv_cache::init_kv_batch(const std::vector<llama_ubatch> & ubatches) {
+    auto sinfos = prepare(ubatches);
+    if (sinfos.empty()) {
+        return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+    }
+
+    return std::make_unique<llama_kv_cache_context>(this, std::move(sinfos), ubatches);
+}
+
 llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_ubatch> & ubatches) {
     llama_kv_cache::slot_info_vec_t res;
 

@@ -89,13 +89,13 @@ ggml_type llama_kv_cache_kvarn_context::type_v() const {
 }
 
 ggml_tensor * llama_kv_cache_kvarn_context::get_k(ggml_context * ctx, int32_t il) const {
-    const auto it = stored_k.find(il);
+    const auto it = stored_k.find(cache->mapped_layer_id(il));
     GGML_ASSERT(it != stored_k.end());
     return cache->materialize(ctx, it->second, il, get_n_kv(), false);
 }
 
 ggml_tensor * llama_kv_cache_kvarn_context::get_v(ggml_context * ctx, int32_t il) const {
-    const auto it = stored_v.find(il);
+    const auto it = stored_v.find(cache->mapped_layer_id(il));
     GGML_ASSERT(it != stored_v.end());
     return cache->materialize(ctx, it->second, il, get_n_kv(), true);
 }
@@ -122,7 +122,7 @@ ggml_tensor * llama_kv_cache_kvarn_context::cpy_k(
         ggml_tensor * k_idxs,
         int32_t il) const {
     auto * result = cache->store(ctx, k_cur, k_idxs, il, false);
-    stored_k[il] = result;
+    stored_k[cache->mapped_layer_id(il)] = result;
     return result;
 }
 
@@ -132,7 +132,7 @@ ggml_tensor * llama_kv_cache_kvarn_context::cpy_v(
         ggml_tensor * v_idxs,
         int32_t il) const {
     auto * result = cache->store(ctx, v_cur, v_idxs, il, true);
-    stored_v[il] = result;
+    stored_v[cache->mapped_layer_id(il)] = result;
     return result;
 }
 
@@ -206,7 +206,12 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         bool offload,
         bool unified,
         uint32_t kv_size,
-        uint32_t n_seq_max) :
+        uint32_t n_seq_max,
+        uint32_t n_pad,
+        uint32_t n_swa,
+        llama_swa_type swa_type,
+        const layer_filter_cb & filter,
+        const layer_reuse_cb & reuse) :
     model(model),
     hparams(hparams),
     params(params),
@@ -220,9 +225,9 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         unified,
         kv_size,
         n_seq_max,
-        1,
-        0,
-        LLAMA_SWA_TYPE_NONE,
+        n_pad,
+        n_swa,
+        swa_type,
         [](int32_t) { return false; },
         nullptr)) {
     struct buft_comparator {
@@ -257,9 +262,13 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
     const uint32_t n_groups = (kv_size + KVAR_N_GROUP - 1) / KVAR_N_GROUP;
     const size_t k_record_size = kvarn_record_bytes(params.key_bits);
     const size_t v_record_size = kvarn_record_bytes(params.value_bits);
+    size_t raw_bytes = 0;
 
     for (uint32_t il = 0; il < hparams.n_layer; ++il) {
         if (!hparams.has_kv(il)) {
+            continue;
+        }
+        if (filter && !filter(il)) {
             continue;
         }
 
@@ -278,10 +287,22 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         }
 
         const uint32_t n_head_kv = hparams.n_head_kv(il);
-        auto * k_records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, k_record_size, n_head_kv, n_groups);
-        auto * v_records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, v_record_size, n_head_kv, n_groups);
-        auto * k_stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_kv, KVAR_N_GROUP * KVAR_N_STAGE_GROUPS);
-        auto * v_stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_kv, KVAR_N_GROUP * KVAR_N_STAGE_GROUPS);
+        const uint32_t head_dim_k = hparams.n_embd_head_k(il);
+        const uint32_t head_dim_v = hparams.n_embd_head_v(il);
+        const int k_slices = llama_kvarn_head_slices(head_dim_k);
+        const int v_slices = llama_kvarn_head_slices(head_dim_v);
+        if (k_slices <= 0 || v_slices <= 0) {
+            throw std::runtime_error(format(
+                "KVarN cache layer %u has unsupported K/V head dimensions %u/%u",
+                il, head_dim_k, head_dim_v));
+        }
+
+        const uint32_t n_head_k_sliced = n_head_kv * (uint32_t) k_slices;
+        const uint32_t n_head_v_sliced = n_head_kv * (uint32_t) v_slices;
+        auto * k_records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, k_record_size, n_head_k_sliced, n_groups);
+        auto * v_records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, v_record_size, n_head_v_sliced, n_groups);
+        auto * k_stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_k_sliced, KVAR_N_GROUP * KVAR_N_STAGE_GROUPS);
+        auto * v_stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_v_sliced, KVAR_N_GROUP * KVAR_N_STAGE_GROUPS);
 
         ggml_format_name(k_records, "cache_kvarn_k_records_l%d", il);
         ggml_format_name(v_records, "cache_kvarn_v_records_l%d", il);
@@ -289,7 +310,47 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         ggml_format_name(v_stage, "cache_kvarn_v_stage_l%d", il);
 
         map_layer_ids[il] = layers.size();
-        layers.push_back({ il, k_records, v_records, k_stage, v_stage });
+        layers.push_back({
+            il,
+            n_head_kv,
+            head_dim_k,
+            head_dim_v,
+            (uint32_t) k_slices,
+            (uint32_t) v_slices,
+            k_records,
+            v_records,
+            k_stage,
+            v_stage,
+        });
+
+        raw_bytes += size_t(kv_size) * n_head_kv * (head_dim_k + head_dim_v) * sizeof(ggml_fp16_t);
+    }
+
+    if (reuse) {
+        for (uint32_t il = 0; il < hparams.n_layer; ++il) {
+            const int32_t il_reuse = reuse(il);
+            if (il_reuse < 0) {
+                continue;
+            }
+            if (filter && !filter(il)) {
+                continue;
+            }
+            const auto src = map_layer_ids.find(il_reuse);
+            if (src == map_layer_ids.end()) {
+                throw std::runtime_error(format("KVarN cache layer %u cannot reuse missing layer %d", il, il_reuse));
+            }
+
+            const auto & reused = layers.at(src->second);
+            if (hparams.n_head_kv(il) != reused.n_head_kv ||
+                hparams.n_embd_head_k(il) != reused.head_dim_k ||
+                hparams.n_embd_head_v(il) != reused.head_dim_v) {
+                throw std::runtime_error(format(
+                    "KVarN cache layer %u cannot reuse layer %d with different KV shape",
+                    il, il_reuse));
+            }
+
+            map_layer_ids[il] = src->second;
+        }
     }
 
     size_t total_bytes = 0;
@@ -314,8 +375,6 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         ctxs_bufs.emplace_back(std::move(ctx), buf);
     }
 
-    const size_t raw_bytes = size_t(kv_size) * hparams.n_layer_kv() *
-        hparams.n_head_kv() * KVAR_N_GROUP * 2 * sizeof(ggml_fp16_t);
     LLAMA_LOG_INFO("%s: type = %s, layers = %zu, groups = %u, KVarN = %.2f MiB, equivalent F16 = %.2f MiB\n",
             __func__, llama_kvarn_type_name(params.type), layers.size(), n_groups,
             total_bytes / 1024.0 / 1024.0, raw_bytes / 1024.0 / 1024.0);
@@ -335,6 +394,25 @@ llama_memory_context_ptr llama_kv_cache_kvarn::init_full() {
 
 llama_memory_context_ptr llama_kv_cache_kvarn::init_update(llama_context * lctx, bool optimize) {
     return metadata->init_update(lctx, optimize);
+}
+
+uint32_t llama_kv_cache_kvarn::get_kv_n_stream() const {
+    return metadata->get_n_stream();
+}
+
+uint32_t llama_kv_cache_kvarn::get_kv_size() const {
+    return metadata->get_size();
+}
+
+llama_memory_context_ptr llama_kv_cache_kvarn::init_kv_batch(const std::vector<llama_ubatch> & ubatches) {
+    auto sinfos = metadata->prepare(ubatches);
+    if (sinfos.empty()) {
+        return std::make_unique<llama_kv_cache_kvarn_context>(
+                this, std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE));
+    }
+
+    return std::make_unique<llama_kv_cache_kvarn_context>(
+            this, std::make_unique<llama_kv_cache_context>(metadata.get(), std::move(sinfos), ubatches));
 }
 
 bool llama_kv_cache_kvarn::get_can_shift() const {
@@ -490,6 +568,10 @@ llama_kv_cache * llama_kv_cache_kvarn::get_metadata_cache() const {
     return metadata.get();
 }
 
+int32_t llama_kv_cache_kvarn::mapped_layer_id(int32_t il) const {
+    return map_layer_ids.at(il);
+}
+
 const llama_kv_cache_kvarn::layer & llama_kv_cache_kvarn::layer_for(int32_t il) const {
     return layers.at(map_layer_ids.at(il));
 }
@@ -503,6 +585,14 @@ ggml_tensor * llama_kv_cache_kvarn::store(
     const auto & layer = layer_for(il);
     if (!ggml_is_contiguous(current)) {
         current = ggml_cont(ctx, current);
+    }
+
+    const uint32_t head_dim = value ? layer.head_dim_v : layer.head_dim_k;
+    const uint32_t slices = value ? layer.v_slices : layer.k_slices;
+    GGML_ASSERT((uint32_t) current->ne[0] == head_dim);
+    GGML_ASSERT((uint32_t) current->ne[1] == layer.n_head_kv);
+    if (slices > 1) {
+        current = ggml_reshape_3d(ctx, current, KVAR_N_GROUP, layer.n_head_kv * slices, current->ne[2]);
     }
 
     return ggml_kvarn_store(
@@ -523,7 +613,7 @@ ggml_tensor * llama_kv_cache_kvarn::materialize(
         uint32_t n_kv,
         bool value) const {
     const auto & layer = layer_for(il);
-    return ggml_kvarn_materialize(
+    ggml_tensor * result = ggml_kvarn_materialize(
         ctx,
         value ? layer.v_records : layer.k_records,
         stored,
@@ -531,4 +621,16 @@ ggml_tensor * llama_kv_cache_kvarn::materialize(
         n_kv,
         value ? params.value_bits : params.key_bits,
         value);
+
+    const uint32_t slices = value ? layer.v_slices : layer.k_slices;
+    if (slices > 1) {
+        result = ggml_reshape_3d(
+                ctx,
+                result,
+                value ? layer.head_dim_v : layer.head_dim_k,
+                layer.n_head_kv,
+                n_kv);
+    }
+
+    return result;
 }

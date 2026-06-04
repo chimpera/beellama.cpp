@@ -92,12 +92,20 @@ static void test_tile_layout() {
     }
 }
 
+static void test_head_dimension_slicing() {
+    require(llama_kvarn_head_slices(128) == 1, "128-dim head should use one KVarN slice");
+    require(llama_kvarn_head_slices(256) == 2, "256-dim head should use two KVarN slices");
+    require(llama_kvarn_head_slices(512) == 4, "512-dim head should use four KVarN slices");
+    require(llama_kvarn_head_slices(384) == 3, "384-dim head should use three KVarN slices");
+    require(llama_kvarn_head_slices(64)  == 0, "64-dim head is not KVarN slice-compatible");
+    require(llama_kvarn_head_slices(513) == 0, "non-128-multiple head is not KVarN slice-compatible");
+}
+
 static void test_runtime_validation() {
-    const llama_kvarn_runtime_requirements supported = {
-        /*.standard_attention =*/ true,
-        /*.head_dim_128       =*/ true,
-        /*.n_seq_max          =*/ 1,
-    };
+    llama_kvarn_runtime_requirements supported = {};
+    supported.attention_supported = true;
+    supported.head_dims_supported = true;
+    supported.n_seq_max = 1;
 
     for (int type = LLAMA_KVARN_K2V2_G128; type <= LLAMA_KVARN_K4V4_G128; ++type) {
         const auto params = llama_kvarn_params_for_type((llama_kvarn_type) type);
@@ -113,12 +121,12 @@ static void test_runtime_validation() {
     require(llama_kvarn_validate_runtime(invalid, supported) != nullptr, "unsupported sink tokens accepted");
 
     auto requirements = supported;
-    requirements.standard_attention = false;
+    requirements.attention_supported = false;
     require(llama_kvarn_validate_runtime(llama_kvarn_params_for_type(LLAMA_KVARN_K4V2_G128), requirements) != nullptr,
-            "nonstandard attention accepted");
+            "unsupported attention accepted");
 
     requirements = supported;
-    requirements.head_dim_128 = false;
+    requirements.head_dims_supported = false;
     require(llama_kvarn_validate_runtime(llama_kvarn_params_for_type(LLAMA_KVARN_K4V2_G128), requirements) != nullptr,
             "unsupported head dimension accepted");
 
@@ -317,6 +325,7 @@ int main() {
 
     test_type_table();
     test_tile_layout();
+    test_head_dimension_slicing();
     test_runtime_validation();
     test_pack_roundtrip(2);
     test_pack_roundtrip(3);

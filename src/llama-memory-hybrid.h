@@ -41,6 +41,11 @@ public:
     const layer_filter_cb & filter_attn = nullptr,
     const layer_filter_cb & filter_recr = nullptr);
 
+    llama_memory_hybrid(
+        const llama_model & model,
+        std::unique_ptr<llama_memory_i> mem_attn,
+        std::unique_ptr<llama_memory_recurrent> mem_recr);
+
     ~llama_memory_hybrid() = default;
 
     //
@@ -87,7 +92,7 @@ public:
     // llama_memory_hybrid specific API
     //
 
-    llama_kv_cache * get_mem_attn() const;
+    llama_memory_i * get_mem_attn() const;
     llama_memory_recurrent * get_mem_recr() const;
 
     void set_force_split_seq(bool v) override { force_split_seq = v; }
@@ -95,7 +100,7 @@ public:
 private:
     const llama_hparams & hparams;
 
-    const std::unique_ptr<llama_kv_cache> mem_attn;
+    const std::unique_ptr<llama_memory_i> mem_attn;
     const std::unique_ptr<llama_memory_recurrent> mem_recr;
 
     bool force_split_seq = false;
@@ -120,7 +125,7 @@ public:
     // init success
     llama_memory_hybrid_context(
               llama_memory_hybrid * mem,
-                  slot_info_vec_t   sinfos_attn,
+        llama_memory_context_ptr   ctx_attn_in,
         std::vector<llama_ubatch>   ubatches);
 
     ~llama_memory_hybrid_context() = default;

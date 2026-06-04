@@ -127,6 +127,10 @@ public:
 
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
 
+    uint32_t get_kv_n_stream() const override;
+    uint32_t get_kv_size() const override;
+    llama_memory_context_ptr init_kv_batch(const std::vector<llama_ubatch> & ubatches) override;
+
     bool get_can_shift() const override;
 
     void clear(bool data) override;

@@ -78,7 +78,12 @@ public:
             bool offload,
             bool unified,
             uint32_t kv_size,
-            uint32_t n_seq_max);
+            uint32_t n_seq_max,
+            uint32_t n_pad = 1,
+            uint32_t n_swa = 0,
+            llama_swa_type swa_type = LLAMA_SWA_TYPE_NONE,
+            const layer_filter_cb & filter = nullptr,
+            const layer_reuse_cb & reuse = nullptr);
 
     llama_memory_context_ptr init_batch(
             llama_batch_allocr & balloc,
@@ -86,6 +91,10 @@ public:
             bool embd_all) override;
     llama_memory_context_ptr init_full() override;
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
+
+    uint32_t get_kv_n_stream() const override;
+    uint32_t get_kv_size() const override;
+    llama_memory_context_ptr init_kv_batch(const std::vector<llama_ubatch> & ubatches) override;
 
     bool get_can_shift() const override;
 
@@ -107,6 +116,7 @@ public:
     void state_read(llama_io_read_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) override;
 
     llama_kv_cache * get_metadata_cache() const;
+    int32_t mapped_layer_id(int32_t il) const;
 
     ggml_tensor * store(
             ggml_context * ctx,
@@ -124,6 +134,11 @@ public:
 private:
     struct layer {
         uint32_t il;
+        uint32_t n_head_kv;
+        uint32_t head_dim_k;
+        uint32_t head_dim_v;
+        uint32_t k_slices;
+        uint32_t v_slices;
         ggml_tensor * k_records;
         ggml_tensor * v_records;
         ggml_tensor * k_stage;

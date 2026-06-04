@@ -39,7 +39,8 @@ public:
                      bool   unified,
                             /* layer filters */
     const layer_filter_cb & filter_attn = nullptr,
-    const layer_filter_cb & filter_recr = nullptr);
+    const layer_filter_cb & filter_recr = nullptr,
+          llama_kvarn_params kvarn = llama_kvarn_default_params());
 
     ~llama_memory_hybrid_iswa() = default;
 
@@ -120,8 +121,7 @@ public:
     // init success
     llama_memory_hybrid_iswa_context(
            llama_memory_hybrid_iswa * mem,
-                    slot_info_vec_t   sinfos_base,
-                    slot_info_vec_t   sinfos_swa,
+        llama_memory_context_ptr   ctx_attn_in,
           std::vector<llama_ubatch>   ubatches);
 
     ~llama_memory_hybrid_iswa_context() = default;

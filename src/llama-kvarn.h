@@ -29,8 +29,8 @@ struct llama_kvarn_tile_layout {
 };
 
 struct llama_kvarn_runtime_requirements {
-    bool standard_attention;
-    bool head_dim_128;
+    bool attention_supported;
+    bool head_dims_supported;
     uint32_t n_seq_max;
 };
 
@@ -40,6 +40,9 @@ LLAMA_API const llama_kvarn_type_desc * llama_kvarn_type_desc_from_name(const ch
 LLAMA_API const llama_kvarn_type_desc * llama_kvarn_type_desc_from_type(llama_kvarn_type type);
 
 LLAMA_API llama_kvarn_tile_layout llama_kvarn_make_layout(int head_dim, int group, int key_bits, int value_bits);
+
+LLAMA_API int  llama_kvarn_head_slices(int head_dim);
+LLAMA_API bool llama_kvarn_head_dim_supported(int head_dim);
 
 LLAMA_API size_t  llama_kvarn_packed_bytes(int n_values, int bits);
 LLAMA_API void    llama_kvarn_pack_bits(const uint8_t * values, int n_values, int bits, uint8_t * dst);

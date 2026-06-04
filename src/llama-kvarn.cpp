@@ -123,11 +123,11 @@ const char * llama_kvarn_validate_runtime(
     if (!std::isfinite(params.pool_mem_frac) || params.pool_mem_frac <= 0.0f || params.pool_mem_frac > 1.0f) {
         return "KVarN pool memory fraction must be in the interval (0, 1]";
     }
-    if (!requirements.standard_attention) {
-        return "KVarN currently supports only standard full attention";
+    if (!requirements.attention_supported) {
+        return "KVarN is not supported by this attention/cache path";
     }
-    if (!requirements.head_dim_128) {
-        return "KVarN currently requires 128-dimensional key and value heads";
+    if (!requirements.head_dims_supported) {
+        return "KVarN requires key and value head dimensions to be 128-slice-compatible";
     }
     if (requirements.n_seq_max != 1) {
         return "KVarN currently supports only one sequence per context";
@@ -173,6 +173,18 @@ llama_kvarn_tile_layout llama_kvarn_make_layout(int head_dim, int group, int key
 
     layout.tile_bytes = llama_kvarn_align_up(off, 8);
     return layout;
+}
+
+int llama_kvarn_head_slices(int head_dim) {
+    if (head_dim < 128 || head_dim > 512 || head_dim % 128 != 0) {
+        return 0;
+    }
+
+    return head_dim / 128;
+}
+
+bool llama_kvarn_head_dim_supported(int head_dim) {
+    return llama_kvarn_head_slices(head_dim) > 0;
 }
 
 size_t llama_kvarn_packed_bytes(int n_values, int bits) {

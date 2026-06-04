@@ -1992,17 +1992,6 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
 }
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
-    if (params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED) {
-        return new llama_kv_cache_kvarn(
-                *this,
-                hparams,
-                params.kvarn,
-                cparams.offload_kqv,
-                cparams.kv_unified,
-                cparams.n_ctx_seq,
-                cparams.n_seq_max);
-    }
-
     llama_memory_i * res;
 
     switch (arch) {
@@ -2107,26 +2096,53 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* offload           */ cparams.offload_kqv,
                             /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
-                            /* filter_recr       */ std::move(filter_recr));
+                            /* filter_recr       */ std::move(filter_recr),
+                            /* kvarn             */ params.kvarn);
                     } else {
-                        res = new llama_memory_hybrid(
-                            /* model             */ *this,
-                            /* attn_type_k       */ params.type_k,
-                            /* attn_type_v       */ params.type_v,
-                            /* attn_v_trans      */ !cparams.flash_attn,
-                            /* attn_kv_size      */ cparams.n_ctx_seq,
-                            /* attn_n_pad        */ 1,
-                            /* attn_n_swa        */ hparams.n_swa,
-                            /* attn_swa_type     */ hparams.swa_type,
-                            /* recurrent_type_k  */ GGML_TYPE_F32,
-                            /* recurrent_type_v  */ GGML_TYPE_F32,
-                            /* recurrent_kv_size */ std::max((uint32_t) 1, cparams.n_seq_max),
-                            /* n_seq_max         */ cparams.n_seq_max,
-                            /* n_rs_seq          */ cparams.n_rs_seq,
-                            /* offload           */ cparams.offload_kqv,
-                            /* unified           */ cparams.kv_unified,
-                            /* filter_attn       */ std::move(filter_attn),
-                            /* filter_recr       */ std::move(filter_recr));
+                        if (params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED) {
+                            auto mem_attn = std::make_unique<llama_kv_cache_kvarn>(
+                                    *this,
+                                    hparams,
+                                    params.kvarn,
+                                    cparams.offload_kqv,
+                                    cparams.kv_unified,
+                                    cparams.n_ctx_seq,
+                                    cparams.n_seq_max,
+                                    1,
+                                    hparams.n_swa,
+                                    hparams.swa_type,
+                                    filter_attn,
+                                    nullptr);
+                            auto mem_recr = std::make_unique<llama_memory_recurrent>(
+                                    *this,
+                                    GGML_TYPE_F32,
+                                    GGML_TYPE_F32,
+                                    cparams.offload_kqv,
+                                    std::max((uint32_t) 1, cparams.n_seq_max),
+                                    cparams.n_seq_max,
+                                    cparams.n_rs_seq,
+                                    filter_recr);
+                            res = new llama_memory_hybrid(*this, std::move(mem_attn), std::move(mem_recr));
+                        } else {
+                            res = new llama_memory_hybrid(
+                                /* model             */ *this,
+                                /* attn_type_k       */ params.type_k,
+                                /* attn_type_v       */ params.type_v,
+                                /* attn_v_trans      */ !cparams.flash_attn,
+                                /* attn_kv_size      */ cparams.n_ctx_seq,
+                                /* attn_n_pad        */ 1,
+                                /* attn_n_swa        */ hparams.n_swa,
+                                /* attn_swa_type     */ hparams.swa_type,
+                                /* recurrent_type_k  */ GGML_TYPE_F32,
+                                /* recurrent_type_v  */ GGML_TYPE_F32,
+                                /* recurrent_kv_size */ std::max((uint32_t) 1, cparams.n_seq_max),
+                                /* n_seq_max         */ cparams.n_seq_max,
+                                /* n_rs_seq          */ cparams.n_rs_seq,
+                                /* offload           */ cparams.offload_kqv,
+                                /* unified           */ cparams.kv_unified,
+                                /* filter_attn       */ std::move(filter_attn),
+                                /* filter_recr       */ std::move(filter_recr));
+                        }
                     }
                 } else {
                     llama_memory_i::layer_reuse_cb reuse = nullptr;
@@ -2163,25 +2179,42 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 cparams.n_ubatch,
                                 1,
                                 filter,
-                                reuse);
+                                reuse,
+                                params.kvarn);
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
-                        res = new llama_kv_cache(
-                                *this,
-                                hparams,
-                                params.type_k,
-                                params.type_v,
-                                !cparams.flash_attn,
-                                cparams.offload_kqv,
-                                cparams.kv_unified,
-                                cparams.n_ctx_seq,
-                                cparams.n_seq_max,
-                                1,
-                                hparams.n_swa,
-                                hparams.swa_type,
-                                filter,
-                                nullptr);
+                        if (params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED) {
+                            res = new llama_kv_cache_kvarn(
+                                    *this,
+                                    hparams,
+                                    params.kvarn,
+                                    cparams.offload_kqv,
+                                    cparams.kv_unified,
+                                    cparams.n_ctx_seq,
+                                    cparams.n_seq_max,
+                                    1,
+                                    hparams.n_swa,
+                                    hparams.swa_type,
+                                    filter,
+                                    reuse);
+                        } else {
+                            res = new llama_kv_cache(
+                                    *this,
+                                    hparams,
+                                    params.type_k,
+                                    params.type_v,
+                                    !cparams.flash_attn,
+                                    cparams.offload_kqv,
+                                    cparams.kv_unified,
+                                    cparams.n_ctx_seq,
+                                    cparams.n_seq_max,
+                                    1,
+                                    hparams.n_swa,
+                                    hparams.swa_type,
+                                    filter,
+                                    nullptr);
+                        }
                     }
                 }
             }

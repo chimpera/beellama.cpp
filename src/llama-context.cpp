@@ -5,6 +5,7 @@
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-io.h"
+#include "llama-kv-cache-kvarn.h"
 #include "llama-kvarn.h"
 #include "llama-memory.h"
 #include "llama-memory-recurrent.h"
@@ -4901,8 +4902,17 @@ static llama_kv_cache * dflash_get_base_kv_cache(llama_memory_t memory) {
     if (auto * kv = dynamic_cast<llama_kv_cache *>(memory)) {
         return kv;
     }
+    if (auto * kv_kvarn = dynamic_cast<llama_kv_cache_kvarn *>(memory)) {
+        return kv_kvarn->get_metadata_cache();
+    }
     if (auto * kv_iswa = dynamic_cast<llama_kv_cache_iswa *>(memory)) {
-        return kv_iswa->get_base();
+        auto * base = kv_iswa->get_base();
+        if (auto * kv = dynamic_cast<llama_kv_cache *>(base)) {
+            return kv;
+        }
+        if (auto * kv_kvarn = dynamic_cast<llama_kv_cache_kvarn *>(base)) {
+            return kv_kvarn->get_metadata_cache();
+        }
     }
     return nullptr;
 }
@@ -8345,33 +8355,31 @@ llama_context * llama_init_from_model(
             LLAMA_LOG_WARN("%s: KVarN is target-context-only; disabling it for this auxiliary context\n", __func__);
             params.kvarn = llama_kvarn_default_params();
         } else {
-            bool head_dim_128 = true;
+            bool head_dims_supported = true;
             for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
                 if (!model->hparams.has_kv(il)) {
                     continue;
                 }
-                head_dim_128 = head_dim_128 &&
-                    model->hparams.n_embd_head_k(il) == 128 &&
-                    model->hparams.n_embd_head_v(il) == 128;
+                head_dims_supported = head_dims_supported &&
+                    llama_kvarn_head_dim_supported(model->hparams.n_embd_head_k(il)) &&
+                    llama_kvarn_head_dim_supported(model->hparams.n_embd_head_v(il));
             }
 
             const bool causal_attn =
                 params.attention_type == LLAMA_ATTENTION_TYPE_UNSPECIFIED
                     ? model->hparams.causal_attn
                     : params.attention_type == LLAMA_ATTENTION_TYPE_CAUSAL;
-            const bool standard_attention =
+            const bool attention_supported =
                 causal_attn &&
                 model->hparams.n_layer_kv() > 0 &&
                 !model->hparams.is_mla() &&
-                !model->hparams.is_swa_any() &&
                 !llm_arch_is_recurrent(model->arch) &&
-                !llm_arch_is_hybrid(model->arch) &&
                 model->arch != LLM_ARCH_DEEPSEEK32 &&
                 model->arch != LLM_ARCH_DFLASH;
             const llama_kvarn_runtime_requirements requirements = {
-                /*.standard_attention =*/ standard_attention,
-                /*.head_dim_128       =*/ head_dim_128,
-                /*.n_seq_max          =*/ std::max(1u, params.n_seq_max),
+                /*.attention_supported =*/ attention_supported,
+                /*.head_dims_supported =*/ head_dims_supported,
+                /*.n_seq_max           =*/ std::max(1u, params.n_seq_max),
             };
 
             if (const char * reason = llama_kvarn_validate_runtime(params.kvarn, requirements)) {
