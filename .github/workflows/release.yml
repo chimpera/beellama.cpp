@@ -1,6 +1,11 @@
-name: Release
+name: Build / Release
+
+run-name: ${{ github.event_name == 'push' && format('Build {0} Preview', github.ref_name) || format('Release {0}', inputs.tag_name) }}
 
 on:
+  push:
+    branches:
+      - "v*"
   workflow_dispatch:
     inputs:
       source_ref:
@@ -16,31 +21,33 @@ on:
         required: true
         type: string
       publish_release:
-        description: "Create or update the GitHub release and release Docker tags"
+        description: "Publish a stable release from its v* tag"
         required: true
         default: false
         type: boolean
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.source_ref || github.ref }}
-  cancel-in-progress: ${{ inputs.publish_release != true }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref || inputs.source_ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON"
 
 jobs:
   release-meta:
-    name: Release metadata
+    name: Publication metadata
     runs-on: ubuntu-24.04
     outputs:
       source_ref: ${{ steps.meta.outputs.source_ref }}
       source_sha: ${{ steps.meta.outputs.source_sha }}
       tag_name: ${{ steps.meta.outputs.tag_name }}
+      version_name: ${{ steps.meta.outputs.version_name }}
+      release_title: ${{ steps.meta.outputs.release_title }}
+      preview: ${{ steps.meta.outputs.preview }}
+      stable_release: ${{ steps.meta.outputs.stable_release }}
       build_packages: ${{ steps.meta.outputs.build_packages }}
-      create_release: ${{ steps.meta.outputs.create_release }}
       publish_docker: ${{ steps.meta.outputs.publish_docker }}
       image_repo: ${{ steps.meta.outputs.image_repo }}
-      ref_name_safe: ${{ steps.meta.outputs.ref_name_safe }}
       short_sha: ${{ steps.meta.outputs.short_sha }}
     steps:
       - name: Clone
@@ -54,16 +61,45 @@ jobs:
         run: |
           set -euo pipefail
 
-          source_ref="${INPUT_SOURCE_REF}"
-          source_sha="${INPUT_SOURCE_SHA}"
-          tag_name="${INPUT_TAG_NAME}"
-          create_release="${INPUT_PUBLISH_RELEASE}"
           build_packages="true"
           publish_docker="true"
-          short_sha="${source_sha::12}"
-          ref_name_safe="$(printf '%s' "${source_ref}" | tr '[:upper:]' '[:lower:]' | sed -E 's#[^a-z0-9_.-]+#-#g; s#^[.-]+##; s#[.-]+$##')"
-          if [[ -z "${ref_name_safe}" ]]; then
-            ref_name_safe="${short_sha}"
+
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            if [[ "${GITHUB_REF}" != refs/heads/v* ]]; then
+              echo "Unsupported preview ref ${GITHUB_REF}; preview builds require a v* branch." >&2
+              exit 1
+            fi
+            source_ref="${GITHUB_REF_NAME}"
+            source_sha="${GITHUB_SHA}"
+            version_name="${source_ref}"
+            tag_name="preview-${source_ref}"
+            release_title="${source_ref} Preview"
+            preview="true"
+            stable_release="false"
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ "${INPUT_PUBLISH_RELEASE}" != "true" ]]; then
+              echo "workflow_dispatch is reserved for main-owned stable releases." >&2
+              exit 1
+            fi
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "Stable release workflow_dispatch must run on main, not ${GITHUB_REF}." >&2
+              exit 1
+            fi
+            source_ref="${INPUT_SOURCE_REF}"
+            source_sha="${INPUT_SOURCE_SHA}"
+            tag_name="${INPUT_TAG_NAME}"
+            version_name="${tag_name}"
+            release_title="${tag_name}"
+            preview="false"
+            stable_release="true"
+          else
+            echo "Unsupported event ${EVENT_NAME}." >&2
+            exit 1
+          fi
+
+          if [[ ! "${version_name}" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]; then
+            echo "Version name ${version_name} is not safe for release assets and Docker tags." >&2
+            exit 1
           fi
 
           if [[ -z "${source_sha}" || ! "${source_sha}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -79,11 +115,24 @@ jobs:
           fi
           git cat-file -e "${source_sha}^{commit}"
 
-          git fetch origin +refs/heads/main:refs/remotes/origin/main --no-tags
-
-          if [[ "${create_release}" == "true" ]]; then
+          if [[ "${preview}" == "true" ]]; then
+            if [[ "${source_ref}" != v* || "${tag_name}" != "preview-${source_ref}" ]]; then
+              echo "Invalid preview metadata: source_ref=${source_ref}, tag_name=${tag_name}." >&2
+              exit 1
+            fi
+            git fetch origin +refs/heads/"${source_ref}":refs/remotes/origin/"${source_ref}" --no-tags
+            branch_commit="$(git rev-parse refs/remotes/origin/"${source_ref}")"
+            if [[ "${branch_commit}" != "${source_sha}" ]]; then
+              echo "Branch ${source_ref} points to ${branch_commit}, not requested source ${source_sha}." >&2
+              exit 1
+            fi
+          else
             if [[ "${tag_name}" != v* ]]; then
               echo "Release publishing requires a v* tag_name." >&2
+              exit 1
+            fi
+            if [[ "${source_ref}" != "${tag_name}" ]]; then
+              echo "Stable release source_ref ${source_ref} must match tag_name ${tag_name}." >&2
               exit 1
             fi
             git fetch origin +refs/tags/"${tag_name}":refs/tags/"${tag_name}"
@@ -92,6 +141,7 @@ jobs:
               echo "Tag ${tag_name} points to ${tag_commit}, not requested source ${source_sha}." >&2
               exit 1
             fi
+            git fetch origin +refs/heads/main:refs/remotes/origin/main --no-tags
             if ! git merge-base --is-ancestor "${source_sha}" refs/remotes/origin/main; then
               echo "Tag ${tag_name} is not reachable from origin/main; refusing to publish." >&2
               exit 1
@@ -105,19 +155,24 @@ jobs:
           echo "source_ref=${source_ref}" >> "${GITHUB_OUTPUT}"
           echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
           echo "tag_name=${tag_name}" >> "${GITHUB_OUTPUT}"
+          echo "version_name=${version_name}" >> "${GITHUB_OUTPUT}"
+          echo "release_title=${release_title}" >> "${GITHUB_OUTPUT}"
+          echo "preview=${preview}" >> "${GITHUB_OUTPUT}"
+          echo "stable_release=${stable_release}" >> "${GITHUB_OUTPUT}"
           echo "build_packages=${build_packages}" >> "${GITHUB_OUTPUT}"
-          echo "create_release=${create_release}" >> "${GITHUB_OUTPUT}"
           echo "publish_docker=${publish_docker}" >> "${GITHUB_OUTPUT}"
           echo "image_repo=${image_repo}" >> "${GITHUB_OUTPUT}"
-          echo "ref_name_safe=${ref_name_safe}" >> "${GITHUB_OUTPUT}"
+          short_sha="${source_sha::12}"
           echo "short_sha=${short_sha}" >> "${GITHUB_OUTPUT}"
           echo "Using source ref: ${source_ref}"
           echo "Using source SHA: ${source_sha}"
           echo "Using package version: ${tag_name}"
+          echo "Release title: ${release_title}"
+          echo "Preview: ${preview}"
           echo "Build packages: ${build_packages}"
-          echo "Publish GitHub release: ${create_release}"
           echo "Publish Docker images: ${publish_docker}"
         env:
+          EVENT_NAME: ${{ github.event_name }}
           INPUT_SOURCE_REF: ${{ inputs.source_ref }}
           INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
           INPUT_TAG_NAME: ${{ inputs.tag_name }}
@@ -1148,16 +1203,20 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ needs.release-meta.outputs.tag_name }}
+          VERSION_NAME: ${{ needs.release-meta.outputs.version_name }}
+          PREVIEW: ${{ needs.release-meta.outputs.preview }}
+          SOURCE_REF: ${{ needs.release-meta.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.release-meta.outputs.source_sha }}
           IMAGE_REPO: ${{ needs.release-meta.outputs.image_repo }}
         run: |
           set -euo pipefail
           release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}"
-          changelog_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md"
+          changelog_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${SOURCE_SHA}/CHANGELOG.md"
           repo_name="${GITHUB_REPOSITORY#*/}"
           repo_name="${repo_name,,}"
           package_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pkgs/container/${repo_name}"
           python3 scripts/extract-changelog.py \
-            --tag "${TAG_NAME}" \
+            --tag "${VERSION_NAME}" \
             --changelog CHANGELOG.md \
             --fallback-url "${changelog_url}" \
             --output changelog-fragment.md
@@ -1168,6 +1227,15 @@ jobs:
             --package-url "${package_url}" \
             --changelog changelog-fragment.md \
             --output release-notes.md
+          if [[ "${PREVIEW}" == "true" ]]; then
+            {
+              echo "> [!WARNING]"
+              echo "> Rolling preview build from \`${SOURCE_REF}\` at \`${SOURCE_SHA}\`. Assets and moving Docker tags are replaced by newer successful branch builds."
+              echo
+              cat release-notes.md
+            } > release-notes-preview.md
+            mv release-notes-preview.md release-notes.md
+          fi
 
       - name: Upload release assets
         uses: actions/upload-artifact@v6
@@ -1415,14 +1483,23 @@ jobs:
         env:
           IMAGE_REPO: ${{ needs.release-meta.outputs.image_repo }}
           TAG_NAME: ${{ needs.release-meta.outputs.tag_name }}
-          RELEASE_TAGS: ${{ needs.release-meta.outputs.create_release }}
-          REF_NAME_SAFE: ${{ needs.release-meta.outputs.ref_name_safe }}
+          STABLE_RELEASE: ${{ needs.release-meta.outputs.stable_release }}
+          SOURCE_REF: ${{ needs.release-meta.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.release-meta.outputs.source_sha }}
           SHORT_SHA: ${{ needs.release-meta.outputs.short_sha }}
           GROUP: ${{ matrix.config.group }}
           PLATFORMS: ${{ matrix.config.platforms }}
           TAG_SUFFIXES: ${{ matrix.config.tag_suffixes }}
         run: |
           set -euo pipefail
+
+          if [[ "${STABLE_RELEASE}" != "true" ]]; then
+            current_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${SOURCE_REF}" | awk '{ print $1 }')"
+            if [[ -z "${current_sha}" || "${current_sha}" != "${SOURCE_SHA}" ]]; then
+              echo "Branch ${SOURCE_REF} moved from ${SOURCE_SHA} to ${current_sha:-missing}; refusing to publish stale preview Docker tags." >&2
+              exit 1
+            fi
+          fi
 
           digest_glob="/tmp/docker-digests/*.tsv"
           if ! ls ${digest_glob} >/dev/null 2>&1; then
@@ -1446,12 +1523,12 @@ jobs:
             if [[ "${suffix}" == "none" ]]; then
               suffix=""
             fi
-            if [[ "${RELEASE_TAGS}" == "true" ]]; then
+            if [[ "${STABLE_RELEASE}" == "true" ]]; then
               tag_args+=("-t" "${IMAGE_REPO}:server${suffix}")
               tag_args+=("-t" "${IMAGE_REPO}:server${suffix}-${TAG_NAME}")
             else
-              tag_args+=("-t" "${IMAGE_REPO}:server${suffix}-${REF_NAME_SAFE}-dev")
-              tag_args+=("-t" "${IMAGE_REPO}:server${suffix}-${REF_NAME_SAFE}-${SHORT_SHA}")
+              tag_args+=("-t" "${IMAGE_REPO}:server${suffix}-${TAG_NAME}")
+              tag_args+=("-t" "${IMAGE_REPO}:server${suffix}-${TAG_NAME}-${SHORT_SHA}")
             fi
           done
 
@@ -1461,7 +1538,6 @@ jobs:
 
   release:
     name: Publish GitHub release
-    if: ${{ needs.release-meta.outputs.create_release == 'true' }}
     needs:
       - release-meta
       - package-assets
@@ -1473,19 +1549,32 @@ jobs:
       - name: Clone
         uses: actions/checkout@v6
         with:
+          ref: ${{ needs.release-meta.outputs.source_sha }}
           fetch-depth: 0
 
-      - name: Verify release tag
+      - name: Prepare publication tag
         env:
+          PREVIEW: ${{ needs.release-meta.outputs.preview }}
+          SOURCE_REF: ${{ needs.release-meta.outputs.source_ref }}
           TAG_NAME: ${{ needs.release-meta.outputs.tag_name }}
           SOURCE_SHA: ${{ needs.release-meta.outputs.source_sha }}
         run: |
           set -euo pipefail
-          git fetch origin +refs/tags/"${TAG_NAME}":refs/tags/"${TAG_NAME}"
-          tag_commit="$(git rev-list -n 1 "${TAG_NAME}")"
-          if [[ "${tag_commit}" != "${SOURCE_SHA}" ]]; then
-            echo "Tag ${TAG_NAME} moved from ${SOURCE_SHA} to ${tag_commit}; refusing to publish." >&2
-            exit 1
+          if [[ "${PREVIEW}" == "true" ]]; then
+            current_sha="$(git ls-remote origin "refs/heads/${SOURCE_REF}" | awk '{ print $1 }')"
+            if [[ -z "${current_sha}" || "${current_sha}" != "${SOURCE_SHA}" ]]; then
+              echo "Branch ${SOURCE_REF} moved from ${SOURCE_SHA} to ${current_sha:-missing}; refusing to publish stale preview assets." >&2
+              exit 1
+            fi
+            git tag -f "${TAG_NAME}" "${SOURCE_SHA}"
+            git push origin "refs/tags/${TAG_NAME}" --force
+          else
+            git fetch origin +refs/tags/"${TAG_NAME}":refs/tags/"${TAG_NAME}"
+            tag_commit="$(git rev-list -n 1 "${TAG_NAME}")"
+            if [[ "${tag_commit}" != "${SOURCE_SHA}" ]]; then
+              echo "Tag ${TAG_NAME} moved from ${SOURCE_SHA} to ${tag_commit}; refusing to publish." >&2
+              exit 1
+            fi
           fi
 
       - name: Download release assets
@@ -1498,6 +1587,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.release-meta.outputs.tag_name }}
+          RELEASE_TITLE: ${{ needs.release-meta.outputs.release_title }}
+          PREVIEW: ${{ needs.release-meta.outputs.preview }}
+          SOURCE_SHA: ${{ needs.release-meta.outputs.source_sha }}
         run: |
           set -euo pipefail
           notes_file="$(find release-bundle -type f -name release-notes.md | head -n 1)"
@@ -1514,7 +1606,30 @@ jobs:
 
           if gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${TAG_NAME}" "${release_files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
-            gh release edit "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" --title "${TAG_NAME}" --notes-file "${notes_file}"
+            if [[ "${PREVIEW}" == "true" ]]; then
+              mapfile -t existing_assets < <(gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
+              for existing_asset in "${existing_assets[@]}"; do
+                keep_asset="false"
+                for release_file in "${release_files[@]}"; do
+                  if [[ "$(basename "${release_file}")" == "${existing_asset}" ]]; then
+                    keep_asset="true"
+                    break
+                  fi
+                done
+                if [[ "${keep_asset}" != "true" ]]; then
+                  gh release delete-asset "${TAG_NAME}" "${existing_asset}" --yes --repo "${GITHUB_REPOSITORY}"
+                fi
+              done
+            fi
+            if [[ "${PREVIEW}" == "true" ]]; then
+              gh release edit "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" --title "${RELEASE_TITLE}" --notes-file "${notes_file}" --target "${SOURCE_SHA}" --prerelease --latest=false --verify-tag
+            else
+              gh release edit "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" --title "${RELEASE_TITLE}" --notes-file "${notes_file}" --target "${SOURCE_SHA}" --prerelease=false --latest=true --verify-tag
+            fi
           else
-            gh release create "${TAG_NAME}" "${release_files[@]}" --repo "${GITHUB_REPOSITORY}" --title "${TAG_NAME}" --notes-file "${notes_file}" --verify-tag
+            if [[ "${PREVIEW}" == "true" ]]; then
+              gh release create "${TAG_NAME}" "${release_files[@]}" --repo "${GITHUB_REPOSITORY}" --title "${RELEASE_TITLE}" --notes-file "${notes_file}" --target "${SOURCE_SHA}" --prerelease --latest=false --verify-tag
+            else
+              gh release create "${TAG_NAME}" "${release_files[@]}" --repo "${GITHUB_REPOSITORY}" --title "${RELEASE_TITLE}" --notes-file "${notes_file}" --target "${SOURCE_SHA}" --latest=true --verify-tag
+            fi
           fi

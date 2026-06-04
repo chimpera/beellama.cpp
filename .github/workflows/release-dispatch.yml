@@ -1,9 +1,9 @@
-name: Dispatch Release
+name: Dispatch Stable Release
+
+run-name: Dispatch release ${{ github.ref_name }}
 
 on:
   push:
-    branches:
-      - "v*"
     tags:
       - "v*"
 
@@ -28,36 +28,26 @@ jobs:
           set -euo pipefail
 
           source_ref="${GITHUB_REF_NAME}"
-          source_sha="${GITHUB_SHA}"
-          publish_release="false"
-          tag_name=""
+          tag_name="${GITHUB_REF_NAME}"
 
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            tag_name="${GITHUB_REF_NAME}"
-            source_sha="$(git rev-list -n 1 "${tag_name}")"
-            publish_release="true"
-          elif [[ "${GITHUB_REF}" == refs/heads/v* ]]; then
-            ref_name_safe="$(printf '%s' "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's#[^a-z0-9_.-]+#-#g; s#^[.-]+##; s#[.-]+$##')"
-            tag_name="${ref_name_safe}-${source_sha::12}"
-          else
-            echo "Unsupported ref ${GITHUB_REF}" >&2
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            echo "Unsupported ref ${GITHUB_REF}; stable release dispatch requires a v* tag." >&2
             exit 1
           fi
+          source_sha="$(git rev-list -n 1 "${tag_name}")"
 
           {
             echo "source_ref=${source_ref}"
             echo "source_sha=${source_sha}"
             echo "tag_name=${tag_name}"
-            echo "publish_release=${publish_release}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Dispatch release workflow on main
+      - name: Dispatch main-owned release workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
           SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
           TAG_NAME: ${{ steps.meta.outputs.tag_name }}
-          PUBLISH_RELEASE: ${{ steps.meta.outputs.publish_release }}
         run: |
           set -euo pipefail
           gh workflow run release.yml \
@@ -65,4 +55,4 @@ jobs:
             --field source_ref="${SOURCE_REF}" \
             --field source_sha="${SOURCE_SHA}" \
             --field tag_name="${TAG_NAME}" \
-            --field publish_release="${PUBLISH_RELEASE}"
+            --field publish_release="true"
