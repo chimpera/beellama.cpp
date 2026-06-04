@@ -100,6 +100,69 @@ static bool server_backend_dev_is_dflash_shared_output_compatible(ggml_backend_d
     return server_backend_dev_type_is_gpu(type) || type == GGML_BACKEND_DEVICE_TYPE_META;
 }
 
+static const char * dflash_backend_extended_argmax_block_reason(ggml_backend_dev_t dev) {
+    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    const char * name = reg ? ggml_backend_reg_name(reg) : nullptr;
+    if (name && strcmp(name, "MTL") == 0) {
+        return "metal-argmax-ext";
+    }
+    return "argmax-ext-backend";
+}
+
+static bool dflash_backend_dev_supports_extended_argmax(ggml_backend_dev_t dev) {
+    if (!dev) {
+        return false;
+    }
+
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    const char * name = reg ? ggml_backend_reg_name(reg) : nullptr;
+    return name &&
+        (strcmp(name, "CUDA") == 0 ||
+         strcmp(name, "ROCm") == 0 ||
+         strcmp(name, "MUSA") == 0);
+}
+
+static bool dflash_target_reduced_verify_supported(const llama_context * ctx, const char ** reason) {
+    const llama_model * model = ctx ? llama_get_model(ctx) : nullptr;
+    if (!model) {
+        if (reason) {
+            *reason = "no-target-model";
+        }
+        return false;
+    }
+
+    ggml_backend_dev_t output_dev = llama_model_dev_output(model);
+    if (dflash_backend_dev_supports_extended_argmax(output_dev)) {
+        return true;
+    }
+
+    if (output_dev && ggml_backend_dev_type(output_dev) == GGML_BACKEND_DEVICE_TYPE_META) {
+        const int32_t n_devices = llama_model_n_devices(model);
+        bool found_execution_device = false;
+        for (int32_t i = 0; i < n_devices; ++i) {
+            ggml_backend_dev_t dev = llama_model_get_device(model, i);
+            if (!server_backend_dev_is_gpu(dev)) {
+                continue;
+            }
+            found_execution_device = true;
+            if (!dflash_backend_dev_supports_extended_argmax(dev)) {
+                if (reason) {
+                    *reason = dflash_backend_extended_argmax_block_reason(dev);
+                }
+                return false;
+            }
+        }
+        if (found_execution_device) {
+            return true;
+        }
+    }
+
+    if (reason) {
+        *reason = dflash_backend_extended_argmax_block_reason(output_dev);
+    }
+    return false;
+}
+
 static bool server_model_supports_device_buffer(const llama_model * model, ggml_backend_dev_t dev) {
     if (!model || !dev) {
         return false;
@@ -548,6 +611,13 @@ static std::vector<llama_token> dflash_sample_reduced_verify(
         return {};
     }
 
+    const llama_model * model = llama_get_model(ctx);
+    const llama_vocab * vocab = model ? llama_model_get_vocab(model) : nullptr;
+    const int32_t n_vocab = vocab ? llama_vocab_n_tokens(vocab) : 0;
+    if (n_vocab <= 0) {
+        return {};
+    }
+
     std::vector<llama_token> candidate_ids((size_t) idxs.size() * (size_t) top_k);
     std::vector<float> candidate_logits((size_t) idxs.size() * (size_t) top_k);
 
@@ -558,7 +628,11 @@ static std::vector<llama_token> dflash_sample_reduced_verify(
             return {};
         }
         for (int k = 0; k < top_k; ++k) {
-            candidate_ids[row * (size_t) top_k + (size_t) k] = (llama_token) ids[k];
+            const int32_t token = ids[k];
+            if (token < 0 || token >= n_vocab) {
+                return {};
+            }
+            candidate_ids[row * (size_t) top_k + (size_t) k] = (llama_token) token;
             candidate_logits[row * (size_t) top_k + (size_t) k] = logits[k];
         }
     }
@@ -5742,9 +5816,15 @@ private:
             llama_set_force_split_seq(ctx_tgt, false);
         }
 
-        const dflash_reduced_verify_plan dflash_verify_plan =
+        dflash_reduced_verify_plan dflash_verify_plan =
             dflash_select_batch_reduced_verify_plan(slots, params_base.sampling, params_base.speculative,
                     use_rejection_sampling, ddtree_batch_active);
+        const char * dflash_target_reduced_reason = dflash_verify_plan.reason;
+        if (dflash_verify_plan.enabled &&
+                !dflash_target_reduced_verify_supported(ctx_tgt, &dflash_target_reduced_reason)) {
+            dflash_verify_plan.enabled = false;
+            dflash_verify_plan.reason = dflash_target_reduced_reason;
+        }
         bool dflash_reduced_verify_ready = false;
         int  dflash_reduced_verify_top_k = dflash_verify_plan.top_k;
         int32_t dflash_reduced_verify_view_start = 0;

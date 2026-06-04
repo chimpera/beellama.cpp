@@ -2032,6 +2032,11 @@ int main(int argc, char ** argv) {
                  cuda_argmax.find("GGML_DFLASH_ARGMAX_PROFILE") != std::string::npos &&
                  cuda_argmax.find("path=%s") != std::string::npos,
         "CUDA top-k verifier path must be selectable and loggable");
+    ok &= expect(server_context.find("dflash_target_reduced_verify_supported") != std::string::npos &&
+                 server_context.find("ggml_backend_reg_name") != std::string::npos &&
+                 server_context.find("\"MTL\"") != std::string::npos &&
+                 server_context.find("metal-argmax-ext") != std::string::npos,
+        "DFlash compact verifier must be disabled on Metal until Metal ARGMAX honors extended top-k/log-prob params");
     ok &= expect(server_context.find("dflash acceptance histogram") != std::string::npos &&
                  server_context.find("dflash_accept_hist_by_ctx") != std::string::npos &&
                  server_context.find("note_dflash_cycle") != std::string::npos &&
