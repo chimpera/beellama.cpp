@@ -194,8 +194,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -262,8 +260,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -335,8 +331,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -406,8 +400,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: Free up disk space
         uses: ggml-org/free-disk-space@v1.3.1
@@ -505,8 +497,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: Free up disk space
         uses: ggml-org/free-disk-space@v1.3.1
@@ -517,13 +507,6 @@ jobs:
         run: |
           sudo mkdir -p "${ONEAPI_ROOT}"
           sudo chown -R "${USER}:${USER}" /opt/intel
-
-      - name: Cache oneAPI installation
-        id: cache-oneapi
-        uses: actions/cache@v5
-        with:
-          path: ${{ env.ONEAPI_ROOT }}
-          key: oneapi-linux-${{ env.ONEAPI_INSTALLER_VERSION }}-${{ runner.os }}
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -537,7 +520,6 @@ jobs:
           sudo apt-get install -y build-essential git cmake ninja-build wget ca-certificates libssl-dev
 
       - name: Install oneAPI
-        if: steps.cache-oneapi.outputs.cache-hit != 'true'
         run: |
           installer="${RUNNER_TEMP}/intel-deep-learning-essentials-${ONEAPI_INSTALLER_VERSION}.sh"
           wget "${ONEAPI_INSTALLER_URL}" -O "${installer}"
@@ -628,8 +610,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -695,8 +675,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -770,15 +748,7 @@ jobs:
           ref: ${{ needs.release-meta.outputs.source_sha }}
           fetch-depth: 0
 
-      - name: Cache oneAPI installation
-        id: cache-oneapi
-        uses: actions/cache@v5
-        with:
-          path: ${{ env.ONEAPI_ROOT }}
-          key: oneapi-windows-${{ env.ONEAPI_INSTALLER_VERSION }}-${{ runner.os }}
-
       - name: Install oneAPI
-        if: steps.cache-oneapi.outputs.cache-hit != 'true'
         shell: cmd
         run: scripts\install-oneapi.bat "%WINDOWS_BASEKIT_URL%" "%WINDOWS_DPCPP_MKL%"
 
@@ -904,8 +874,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: Install ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -914,15 +882,7 @@ jobs:
           variant: ccache
           evict-old-files: 1d
 
-      - name: Cache CUDA Toolkit
-        id: cache-cuda
-        uses: actions/cache@v5
-        with:
-          path: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda }}
-          key: cuda-windows-${{ matrix.cuda }}-${{ hashFiles('.github/actions/windows-setup-cuda/action.yml') }}
-
       - name: Install CUDA Toolkit
-        if: steps.cache-cuda.outputs.cache-hit != 'true'
         uses: ./.github/actions/windows-setup-cuda
         with:
           cuda_version: ${{ matrix.cuda }}
@@ -1021,21 +981,12 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: "tools/ui/package-lock.json"
 
       - name: Grab rocWMMA package
         run: |
           curl -o rocwmma.deb "https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocwmma-dev/rocwmma-dev_2.2.0.70201-81~24.04_amd64.deb"
           7z x rocwmma.deb
           7z x data.tar
-
-      - name: Cache ROCm installation
-        id: cache-rocm
-        uses: actions/cache@v5
-        with:
-          path: C:\Program Files\AMD\ROCm
-          key: rocm-${{ env.HIPSDK_INSTALLER_VERSION }}-${{ runner.os }}
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -1044,7 +995,6 @@ jobs:
           evict-old-files: 1d
 
       - name: Install ROCm
-        if: steps.cache-rocm.outputs.cache-hit != 'true'
         run: |
           $ErrorActionPreference = "Stop"
           Invoke-WebRequest -Uri "https://download.amd.com/developer/eula/rocm-hub/AMD-Software-PRO-Edition-${{ env.HIPSDK_INSTALLER_VERSION }}-Win11-For-HIP.exe" -OutFile "${env:RUNNER_TEMP}\rocm-install.exe"
