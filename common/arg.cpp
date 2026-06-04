@@ -431,6 +431,25 @@ static std::string get_all_kv_cache_types() {
     return msg.str();
 }
 
+static llama_kvarn_type kvarn_type_from_str(const std::string & value) {
+    const llama_kvarn_type type = llama_kvarn_type_from_name(value.c_str());
+    if (type == LLAMA_KVARN_TYPE_INVALID) {
+        throw std::runtime_error("Unsupported KVarN cache type: " + value);
+    }
+    return type;
+}
+
+static std::string get_all_kvarn_types() {
+    std::ostringstream msg;
+    for (int type = LLAMA_KVARN_TYPE_DISABLED; type < LLAMA_KVARN_TYPE_COUNT; ++type) {
+        if (type != LLAMA_KVARN_TYPE_DISABLED) {
+            msg << ", ";
+        }
+        msg << llama_kvarn_type_name(static_cast<llama_kvarn_type>(type));
+    }
+    return msg.str();
+}
+
 static bool parse_bool_value(const std::string & value) {
     if (is_truthy(value)) {
         return true;
@@ -2210,6 +2229,63 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.cache_type_v = kv_cache_type_from_str(value);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
+    add_opt(common_arg(
+        {"--kv-kvarn"}, "TYPE",
+        string_format(
+            "KVarN structured KV cache type\n"
+            "allowed values: %s\n"
+            "(default: %s)",
+            get_all_kvarn_types().c_str(),
+            llama_kvarn_type_name(params.kvarn.type)
+        ),
+        [](common_params & params, const std::string & value) {
+            const llama_kvarn_type type = kvarn_type_from_str(value);
+            llama_kvarn_params selected = llama_kvarn_params_for_type(type);
+            selected.sinkhorn_iters      = params.kvarn.sinkhorn_iters;
+            selected.sink_tokens         = params.kvarn.sink_tokens;
+            selected.pool_mem_frac       = params.kvarn.pool_mem_frac;
+            selected.fail_if_unsupported = params.kvarn.fail_if_unsupported;
+            params.kvarn = selected;
+        }
+    ).set_env("LLAMA_ARG_KV_KVARN"));
+    add_opt(common_arg(
+        {"--kv-kvarn-sink-tokens"}, "N",
+        string_format("KVarN uncompressed sink tokens per sequence (currently fixed at 128, default: %d)", params.kvarn.sink_tokens),
+        [](common_params & params, int value) {
+            if (value != 128) {
+                throw std::invalid_argument("KVarN currently requires exactly 128 sink tokens");
+            }
+            params.kvarn.sink_tokens = value;
+        }
+    ).set_env("LLAMA_ARG_KV_KVARN_SINK_TOKENS"));
+    add_opt(common_arg(
+        {"--kv-kvarn-sinkhorn-iters"}, "N",
+        string_format("KVarN Sinkhorn normalization iterations (default: %d)", params.kvarn.sinkhorn_iters),
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("KVarN Sinkhorn iteration count must be positive");
+            }
+            params.kvarn.sinkhorn_iters = value;
+        }
+    ).set_env("LLAMA_ARG_KV_KVARN_SINKHORN_ITERS"));
+    add_opt(common_arg(
+        {"--kv-kvarn-pool-mem-frac"}, "F",
+        string_format("fraction of device memory available to the KVarN fp16 pool (default: %.2f)", params.kvarn.pool_mem_frac),
+        [](common_params & params, const std::string & value) {
+            const float frac = std::stof(value);
+            if (frac <= 0.0f || frac > 1.0f) {
+                throw std::invalid_argument("KVarN pool memory fraction must be in (0, 1]");
+            }
+            params.kvarn.pool_mem_frac = frac;
+        }
+    ).set_env("LLAMA_ARG_KV_KVARN_POOL_MEM_FRAC"));
+    add_opt(common_arg(
+        {"--kv-kvarn-fallback"},
+        "fall back to the normal KV cache when KVarN is unsupported",
+        [](common_params & params) {
+            params.kvarn.fail_if_unsupported = false;
+        }
+    ).set_env("LLAMA_ARG_KV_KVARN_FALLBACK"));
     add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",

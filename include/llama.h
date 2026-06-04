@@ -193,6 +193,43 @@ extern "C" {
 
     LLAMA_API const char * llama_flash_attn_type_name(enum llama_flash_attn_type flash_attn_type);
 
+    enum llama_kvarn_type {
+        LLAMA_KVARN_TYPE_INVALID  = -1,
+        LLAMA_KVARN_TYPE_DISABLED = 0,
+
+        LLAMA_KVARN_K2V2_G128,
+        LLAMA_KVARN_K2V3_G128,
+        LLAMA_KVARN_K2V4_G128,
+
+        LLAMA_KVARN_K3V2_G128,
+        LLAMA_KVARN_K3V3_G128,
+        LLAMA_KVARN_K3V4_G128,
+
+        LLAMA_KVARN_K4V2_G128,
+        LLAMA_KVARN_K4V3_G128,
+        LLAMA_KVARN_K4V4_G128,
+
+        LLAMA_KVARN_TYPE_COUNT,
+    };
+
+    struct llama_kvarn_params {
+        enum llama_kvarn_type type;
+
+        int32_t key_bits;
+        int32_t value_bits;
+        int32_t group;
+        int32_t sinkhorn_iters;
+        int32_t sink_tokens;
+
+        float pool_mem_frac;
+        bool  fail_if_unsupported;
+    };
+
+    LLAMA_API const char *             llama_kvarn_type_name       (enum llama_kvarn_type type);
+    LLAMA_API enum llama_kvarn_type    llama_kvarn_type_from_name  (const char * name);
+    LLAMA_API struct llama_kvarn_params llama_kvarn_default_params (void);
+    LLAMA_API struct llama_kvarn_params llama_kvarn_params_for_type(enum llama_kvarn_type type);
+
     enum llama_split_mode {
         LLAMA_SPLIT_MODE_NONE   = 0, // single GPU
         LLAMA_SPLIT_MODE_LAYER  = 1, // split layers and KV across GPUs
@@ -404,6 +441,10 @@ extern "C" {
         // DFlash drafter: cross-attention window in tokens.
         // How many target hidden states the drafter sees (default: 512).
         int32_t dflash_cross_ctx;
+
+        // BeeLlama fork-specific structured KVarN KV cache configuration.
+        // Kept separate from type_k/type_v because KVarN stores joint 128-token K/V tiles.
+        struct llama_kvarn_params kvarn;
     };
 
     struct llama_model_tensor_override {

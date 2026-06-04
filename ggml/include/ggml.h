@@ -578,6 +578,8 @@ extern "C" {
         GGML_OP_GATED_DELTA_NET_TREE,
         GGML_OP_SSM_CONV_TREE,
         GGML_OP_TURBO_WHT,
+        GGML_OP_KVARN_STORE,
+        GGML_OP_KVARN_MATERIALIZE,
 
         GGML_OP_UNARY,
 
@@ -2614,6 +2616,27 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             int                   direction);
+
+    // KVarN structured KV-cache operations. These are fork-specific and intentionally
+    // separate from ggml_type because KVarN records span complete 128-token tiles.
+    GGML_API struct ggml_tensor * ggml_kvarn_store(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * current,
+            struct ggml_tensor  * indices,
+            struct ggml_tensor  * stage,
+            struct ggml_tensor  * records,
+            int                   bits,
+            int                   sinkhorn_iters,
+            bool                  value);
+
+    GGML_API struct ggml_tensor * ggml_kvarn_materialize(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage_after_store,
+            struct ggml_tensor  * indices,
+            int                   n_kv,
+            int                   bits,
+            bool                  value);
 
     // custom operators
 

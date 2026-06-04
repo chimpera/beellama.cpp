@@ -98,6 +98,14 @@ int main(void) {
     argv = {"binary_name", "-sm", "hello"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
+    params = common_params();
+    argv = {"binary_name", "--kv-kvarn", "kvarn_k5v2_g128"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
+    params = common_params();
+    argv = {"binary_name", "-m", "model_file.gguf", "--kv-kvarn", "kvarn_k4v2_g128", "--kv-kvarn-sink-tokens", "256"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
     // removed legacy speculative aliases
     argv = {"binary_name", "--draft", "123"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
@@ -149,6 +157,25 @@ int main(void) {
     argv = {"binary_name", "-t", "1234"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.cpuparams.n_threads == 1234);
+
+    params = common_params();
+    argv = {
+        "binary_name", "-m", "model_file.gguf",
+        "--kv-kvarn", "kvarn_k4v2_g128",
+        "--kv-kvarn-sink-tokens", "128",
+        "--kv-kvarn-sinkhorn-iters", "12",
+        "--kv-kvarn-pool-mem-frac", "0.15",
+        "--kv-kvarn-fallback",
+    };
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+    assert(params.kvarn.type == LLAMA_KVARN_K4V2_G128);
+    assert(params.kvarn.key_bits == 4);
+    assert(params.kvarn.value_bits == 2);
+    assert(params.kvarn.sink_tokens == 128);
+    assert(params.kvarn.sinkhorn_iters == 12);
+    assert(params.kvarn.pool_mem_frac == 0.15f);
+    assert(!params.kvarn.fail_if_unsupported);
+    assert(common_context_params_to_llama(params).kvarn.type == LLAMA_KVARN_K4V2_G128);
 
     argv = {"binary_name", "--verbose"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));

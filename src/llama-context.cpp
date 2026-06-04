@@ -5,6 +5,7 @@
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-io.h"
+#include "llama-kvarn.h"
 #include "llama-memory.h"
 #include "llama-memory-recurrent.h"
 #include "llama-memory-hybrid.h"
@@ -315,6 +316,7 @@ llama_context::llama_context(
 
     cparams.cb_eval           = params.cb_eval;
     cparams.cb_eval_user_data = params.cb_eval_user_data;
+    cparams.kvarn             = params.kvarn;
 
     // DFlash: drafter graph width = n_slots × dflash_cross_ctx. Set at init so the
     // initial graph reserve allocates a compute buffer large enough for the requested width.
@@ -540,6 +542,7 @@ llama_context::llama_context(
             /*.type_v   =*/ params.type_v,
             /*.swa_full =*/ params.swa_full,
             /*.ctx_type =*/ cparams.ctx_type,
+            /*.kvarn    =*/ cparams.kvarn,
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
@@ -8313,6 +8316,7 @@ llama_context_params llama_context_default_params() {
         /*.n_sampler                   =*/ 0,
         /*.dflash_n_slots              =*/ 1,
         /*.dflash_cross_ctx            =*/ 512,
+        /*.kvarn                       =*/ llama_kvarn_default_params(),
     };
 
     return result;
@@ -8334,6 +8338,63 @@ llama_context * llama_init_from_model(
     if (params.n_ctx == 0 && model->hparams.n_ctx_train == 0) {
         LLAMA_LOG_ERROR("%s: n_ctx and model->hparams.n_ctx_train cannot both be zero\n", __func__);
         return nullptr;
+    }
+
+    if (params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED) {
+        if (params.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT || llm_arch_is_dflash_drafter(model->arch)) {
+            LLAMA_LOG_WARN("%s: KVarN is target-context-only; disabling it for this auxiliary context\n", __func__);
+            params.kvarn = llama_kvarn_default_params();
+        } else {
+            bool head_dim_128 = true;
+            for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
+                if (!model->hparams.has_kv(il)) {
+                    continue;
+                }
+                head_dim_128 = head_dim_128 &&
+                    model->hparams.n_embd_head_k(il) == 128 &&
+                    model->hparams.n_embd_head_v(il) == 128;
+            }
+
+            const bool causal_attn =
+                params.attention_type == LLAMA_ATTENTION_TYPE_UNSPECIFIED
+                    ? model->hparams.causal_attn
+                    : params.attention_type == LLAMA_ATTENTION_TYPE_CAUSAL;
+            const bool standard_attention =
+                causal_attn &&
+                model->hparams.n_layer_kv() > 0 &&
+                !model->hparams.is_mla() &&
+                !model->hparams.is_swa_any() &&
+                !llm_arch_is_recurrent(model->arch) &&
+                !llm_arch_is_hybrid(model->arch) &&
+                model->arch != LLM_ARCH_DEEPSEEK32 &&
+                model->arch != LLM_ARCH_DFLASH;
+            const llama_kvarn_runtime_requirements requirements = {
+                /*.standard_attention =*/ standard_attention,
+                /*.head_dim_128       =*/ head_dim_128,
+                /*.n_seq_max          =*/ std::max(1u, params.n_seq_max),
+            };
+
+            if (const char * reason = llama_kvarn_validate_runtime(params.kvarn, requirements)) {
+                if (params.kvarn.fail_if_unsupported) {
+                    LLAMA_LOG_ERROR("%s: cannot enable %s: %s\n",
+                            __func__, llama_kvarn_type_name(params.kvarn.type), reason);
+                    return nullptr;
+                }
+                LLAMA_LOG_WARN("%s: cannot enable %s: %s; falling back to the normal KV cache\n",
+                        __func__, llama_kvarn_type_name(params.kvarn.type), reason);
+                params.kvarn = llama_kvarn_default_params();
+            } else {
+                if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
+                    LLAMA_LOG_WARN("%s: KVarN requires Flash Attention; enabling it\n", __func__);
+                    params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+                }
+                if (params.type_k != GGML_TYPE_F16 || params.type_v != GGML_TYPE_F16) {
+                    LLAMA_LOG_WARN("%s: --cache-type-k/v are ignored while KVarN is enabled\n", __func__);
+                }
+                LLAMA_LOG_INFO("%s: enabling structured KVarN cache type %s\n",
+                        __func__, llama_kvarn_type_name(params.kvarn.type));
+            }
+        }
     }
 
     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && model->arch == LLM_ARCH_GROK) {

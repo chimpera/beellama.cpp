@@ -99,6 +99,7 @@ int main(int argc, char ** argv) {
     const std::string ggml_cpu_c = read_file(root + "/ggml/src/ggml-cpu/ggml-cpu.c");
     const std::string ggml_cpu_quants_h = read_file(root + "/ggml/src/ggml-cpu/quants.h");
     const std::string ggml_cpu_quants_c = read_file(root + "/ggml/src/ggml-cpu/quants.c");
+    const std::string server_cpp = read_file(root + "/tools/server/server.cpp");
     const std::string server_context = read_file(root + "/tools/server/server-context.cpp");
     const std::string server_adaptive_dm_h = read_file(root + "/tools/server/server-adaptive-dm.h");
     const std::string server_task = read_file(root + "/tools/server/server-task.cpp");
@@ -2144,6 +2145,9 @@ int main(int argc, char ** argv) {
         "ordinary non-DFlash draft models must create and wire a draft context for upstream draft-simple speculation");
     ok &= expect(speculative.find("llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, pos_min_by_seq[seq_id], -1);") != std::string::npos,
         "ordinary draft-simple process must roll draft KV back before replaying overlapping verifier batches");
+    ok &= expect(server_cpp.find("params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED") != std::string::npos &&
+                 server_cpp.find("n_parallel is set to auto with KVarN, using n_parallel = 1") != std::string::npos,
+        "server auto n_parallel must keep KVarN within its single-sequence runtime contract");
 
     return ok ? 0 : 1;
 }

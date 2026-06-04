@@ -9,6 +9,7 @@
 #include "llama-model-loader.h"
 
 #include "llama-kv-cache.h"
+#include "llama-kv-cache-kvarn.h"
 #include "llama-kv-cache-iswa.h"
 #include "llama-kv-cache-dsa.h"
 #include "llama-memory-hybrid.h"
@@ -1991,6 +1992,17 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
 }
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
+    if (params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED) {
+        return new llama_kv_cache_kvarn(
+                *this,
+                hparams,
+                params.kvarn,
+                cparams.offload_kqv,
+                cparams.kv_unified,
+                cparams.n_ctx_seq,
+                cparams.n_seq_max);
+    }
+
     llama_memory_i * res;
 
     switch (arch) {

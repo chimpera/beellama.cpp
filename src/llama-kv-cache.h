@@ -374,20 +374,20 @@ public:
     // llama_kv_cache_context specific API
     //
 
-    uint32_t get_n_kv() const;
-    llama_kv_cache * get_kv() const;
-    const llama_kv_cache::slot_info & current_sinfo() const;
+    virtual uint32_t get_n_kv() const;
+    virtual llama_kv_cache * get_kv() const;
+    virtual const llama_kv_cache::slot_info & current_sinfo() const;
 
-    ggml_type type_k() const;
-    ggml_type type_v() const;
+    virtual ggml_type type_k() const;
+    virtual ggml_type type_v() const;
 
     // get views of the current state of the cache
-    ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
-    ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+    virtual ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
+    virtual ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
 
     // TurboQuant rotation accessors
-    ggml_tensor * get_turbo_rotation() const;
-    ggml_tensor * get_turbo_rotation_inv() const;
+    virtual ggml_tensor * get_turbo_rotation() const;
+    virtual ggml_tensor * get_turbo_rotation_inv() const;
 
     // Override virtual methods from llama_memory_context_i
     ggml_tensor * get_turbo_rot_forward() const override;
@@ -399,31 +399,31 @@ public:
     //   - k_idxs [n_tokens]
     //   - v_cur  [n_embd_head_v, n_head_v, n_tokens]
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
-    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
-    ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
+    virtual ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
+    virtual ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache
     // the indices address the global KV cache (not per stream) - this is not relevant for the user of this API, but
     //   helps understand the implementation logic of cpy_k and cpy_v
-    ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
-    ggml_tensor * build_input_v_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
+    virtual ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
+    virtual ggml_tensor * build_input_v_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
 
-    ggml_tensor * build_input_k_rot(ggml_context * ctx) const;
-    ggml_tensor * build_input_v_rot(ggml_context * ctx) const;
+    virtual ggml_tensor * build_input_k_rot(ggml_context * ctx) const;
+    virtual ggml_tensor * build_input_v_rot(ggml_context * ctx) const;
 
-    void set_input_k_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
-    void set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
-    void set_input_k_idxs_backend(ggml_tensor * dst, const llama_ubatch * ubatch) const;
-    void set_input_v_idxs_backend(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_k_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_k_idxs_backend(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_v_idxs_backend(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
-    void set_input_k_shift   (ggml_tensor * dst) const;
-    void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
-    void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_k_shift   (ggml_tensor * dst) const;
+    virtual void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+    virtual void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
-    void set_input_k_rot(ggml_tensor * dst) const;
-    void set_input_v_rot(ggml_tensor * dst) const;
-    void set_input_k_rot_backend(ggml_tensor * dst) const;
-    void set_input_v_rot_backend(ggml_tensor * dst) const;
+    virtual void set_input_k_rot(ggml_tensor * dst) const;
+    virtual void set_input_v_rot(ggml_tensor * dst) const;
+    virtual void set_input_k_rot_backend(ggml_tensor * dst) const;
+    virtual void set_input_v_rot_backend(ggml_tensor * dst) const;
 
 private:
     llama_memory_status status;

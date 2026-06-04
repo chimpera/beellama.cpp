@@ -51,6 +51,17 @@ struct llama_cparams {
     enum llama_context_type ctx_type;
     enum llama_pooling_type pooling_type;
 
+    llama_kvarn_params kvarn = {
+        /*.type                =*/ LLAMA_KVARN_TYPE_DISABLED,
+        /*.key_bits            =*/ 0,
+        /*.value_bits          =*/ 0,
+        /*.group               =*/ 128,
+        /*.sinkhorn_iters      =*/ 16,
+        /*.sink_tokens         =*/ 128,
+        /*.pool_mem_frac       =*/ 0.08f,
+        /*.fail_if_unsupported =*/ true,
+    };
+
     // DFlash: target layer indices to capture hidden states from (empty = disabled)
     std::vector<int> dflash_capture_layers;
 

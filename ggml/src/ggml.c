@@ -1126,6 +1126,8 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     [GGML_OP_GATED_DELTA_NET_TREE]  = "GATED_DELTA_NET_TREE",
     [GGML_OP_SSM_CONV_TREE]         = "SSM_CONV_TREE",
     [GGML_OP_TURBO_WHT]             = "TURBO_WHT",
+    [GGML_OP_KVARN_STORE]           = "KVARN_STORE",
+    [GGML_OP_KVARN_MATERIALIZE]     = "KVARN_MATERIALIZE",
     [GGML_OP_UNARY]                  = "UNARY",
     [GGML_OP_MAP_CUSTOM1]            = "MAP_CUSTOM1",
     [GGML_OP_MAP_CUSTOM2]            = "MAP_CUSTOM2",
@@ -1138,7 +1140,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     [GGML_OP_GLU]                     = "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
+static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     [GGML_OP_NONE]                  = "none",
@@ -1230,6 +1232,8 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     [GGML_OP_GATED_DELTA_NET_TREE]  = "gated_delta_net_tree(q, k, v, g, beta, s, parents, inter)",
     [GGML_OP_SSM_CONV_TREE]         = "ssm_conv_tree(x, c, parents)",
     [GGML_OP_TURBO_WHT]             = "turbo_wht(a)",
+    [GGML_OP_KVARN_STORE]           = "kvarn_store(cur, idx, stage, records)",
+    [GGML_OP_KVARN_MATERIALIZE]     = "kvarn_materialize(records, stage, idx)",
     [GGML_OP_UNARY]                  = "unary(x)",
     [GGML_OP_MAP_CUSTOM1]            = "map_custom(x)",
     [GGML_OP_MAP_CUSTOM2]            = "map_custom(x,y)",
@@ -1242,7 +1246,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     [GGML_OP_GLU]                     = "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
+static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6445,6 +6449,66 @@ struct ggml_tensor * ggml_turbo_wht(
     // Store direction in op_params: 0 = forward, 1 = inverse
     memcpy(result->op_params, &direction, sizeof(int));
 
+    return result;
+}
+
+// ggml_kvarn_store
+
+struct ggml_tensor * ggml_kvarn_store(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * current,
+        struct ggml_tensor  * indices,
+        struct ggml_tensor  * stage,
+        struct ggml_tensor  * records,
+        int                   bits,
+        int                   sinkhorn_iters,
+        bool                  value) {
+    GGML_ASSERT(current->type == GGML_TYPE_F32);
+    GGML_ASSERT(indices->type == GGML_TYPE_I64);
+    GGML_ASSERT(stage->type == GGML_TYPE_F16);
+    GGML_ASSERT(records->type == GGML_TYPE_I8);
+    GGML_ASSERT(current->ne[0] == 128);
+    GGML_ASSERT(stage->ne[0] == 128 && stage->ne[2] == 384);
+    GGML_ASSERT(current->ne[1] == stage->ne[1] && stage->ne[1] == records->ne[1]);
+    GGML_ASSERT(current->ne[2] == indices->ne[0]);
+    GGML_ASSERT(bits >= 2 && bits <= 4 && sinkhorn_iters > 0);
+
+    struct ggml_tensor * result = ggml_view_tensor(ctx, stage);
+    result->op = GGML_OP_KVARN_STORE;
+    result->src[0] = current;
+    result->src[1] = indices;
+    result->src[2] = stage;
+    result->src[3] = records;
+    ggml_set_op_params_i32(result, 0, bits);
+    ggml_set_op_params_i32(result, 1, sinkhorn_iters);
+    ggml_set_op_params_i32(result, 2, value ? 1 : 0);
+    return result;
+}
+
+// ggml_kvarn_materialize
+
+struct ggml_tensor * ggml_kvarn_materialize(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * records,
+        struct ggml_tensor  * stage_after_store,
+        struct ggml_tensor  * indices,
+        int                   n_kv,
+        int                   bits,
+        bool                  value) {
+    GGML_ASSERT(records->type == GGML_TYPE_I8);
+    GGML_ASSERT(stage_after_store->type == GGML_TYPE_F16);
+    GGML_ASSERT(indices->type == GGML_TYPE_I64);
+    GGML_ASSERT(stage_after_store->ne[0] == 128 && stage_after_store->ne[2] == 384);
+    GGML_ASSERT(stage_after_store->ne[1] == records->ne[1]);
+    GGML_ASSERT(n_kv > 0 && bits >= 2 && bits <= 4);
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 128, stage_after_store->ne[1], n_kv);
+    result->op = GGML_OP_KVARN_MATERIALIZE;
+    result->src[0] = records;
+    result->src[1] = stage_after_store;
+    result->src[2] = indices;
+    ggml_set_op_params_i32(result, 0, bits);
+    ggml_set_op_params_i32(result, 1, value ? 1 : 0);
     return result;
 }
 
