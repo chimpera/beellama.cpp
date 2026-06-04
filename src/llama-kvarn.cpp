@@ -129,8 +129,8 @@ const char * llama_kvarn_validate_runtime(
     if (!requirements.head_dims_supported) {
         return "KVarN requires key and value head dimensions to be 128-slice-compatible";
     }
-    if (requirements.n_seq_max != 1) {
-        return "KVarN currently supports only one sequence per context";
+    if (requirements.n_seq_max > 1 && requirements.kv_unified) {
+        return "KVarN supports multiple sequences only with non-unified KV streams";
     }
 
     return nullptr;

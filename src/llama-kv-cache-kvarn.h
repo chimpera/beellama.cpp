@@ -129,6 +129,7 @@ public:
             ggml_tensor * stored,
             int32_t il,
             uint32_t n_kv,
+            const llama_kv_cache::slot_info & sinfo,
             bool value) const;
 
 private:
@@ -143,6 +144,10 @@ private:
         ggml_tensor * v_records;
         ggml_tensor * k_stage;
         ggml_tensor * v_stage;
+        std::vector<ggml_tensor *> k_records_stream;
+        std::vector<ggml_tensor *> v_records_stream;
+        std::vector<ggml_tensor *> k_stage_stream;
+        std::vector<ggml_tensor *> v_stage_stream;
     };
 
     const layer & layer_for(int32_t il) const;
@@ -151,6 +156,8 @@ private:
     const llama_model & model;
     const llama_hparams & hparams;
     const llama_kvarn_params params;
+    const uint32_t n_stream;
+    const uint32_t n_groups_per_stream;
 
     std::unique_ptr<llama_kv_cache> metadata;
     std::vector<layer> layers;

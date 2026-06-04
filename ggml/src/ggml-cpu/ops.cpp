@@ -11291,6 +11291,7 @@ static uint8_t kvarn_cpu_unpack(const uint8_t * payload, int index, int bits) {
 static void kvarn_cpu_quantize_stage(
         const ggml_tensor * stage,
         int64_t head,
+        int64_t stage_base,
         int64_t stage_group,
         int bits,
         int iterations,
@@ -11299,7 +11300,7 @@ static void kvarn_cpu_quantize_stage(
     std::vector<float> tile(128 * 128);
     for (int t = 0; t < 128; ++t) {
         for (int d = 0; d < 128; ++d) {
-            const int64_t stage_pos = 128 + ((stage_group - 1) & 1) * 128 + t;
+            const int64_t stage_pos = stage_base + 128 + ((stage_group - 1) & 1) * 128 + t;
             const char * ptr = (const char *) stage->data + d * stage->nb[0] + head * stage->nb[1] + stage_pos * stage->nb[2];
             const float x = ggml_fp16_to_fp32(*(const ggml_fp16_t *) ptr);
             tile[value ? t * 128 + d : d * 128 + t] = x;
@@ -11373,23 +11374,31 @@ void ggml_compute_forward_kvarn_store(const ggml_compute_params * params, ggml_t
     const int64_t n_heads = current->ne[1];
     const int64_t n_tokens = current->ne[2];
     const int64_t * idx_data = (const int64_t *) indices->data;
+    const int64_t n_stream = stage->ne[2] / 384;
+    const int64_t groups_per_stream = records->ne[2] / n_stream;
 
     for (int64_t t = 0; t < n_tokens; ++t) {
         const int64_t idx = idx_data[t];
         GGML_ASSERT(idx >= 0);
-        const int64_t group = idx / 128;
+        const int64_t group_global = idx / 128;
+        const int64_t stream = group_global / groups_per_stream;
+        const int64_t group = group_global - stream * groups_per_stream;
         const int64_t pos = idx % 128;
-        GGML_ASSERT(group < records->ne[2]);
+        GGML_ASSERT(stream >= 0 && stream < n_stream);
+        GGML_ASSERT(group >= 0 && group < groups_per_stream);
+
+        const int64_t stage_base = stream * 384;
 
         if (group > 2 && pos == 0) {
             const int64_t flush_group = group - 2;
+            const int64_t flush_record_group = stream * groups_per_stream + flush_group;
             for (int64_t h = 0; h < n_heads; ++h) {
-                uint8_t * record = (uint8_t *) records->data + h * records->nb[1] + flush_group * records->nb[2];
-                kvarn_cpu_quantize_stage(stage, h, flush_group, bits, iterations, value, record);
+                uint8_t * record = (uint8_t *) records->data + h * records->nb[1] + flush_record_group * records->nb[2];
+                kvarn_cpu_quantize_stage(stage, h, stage_base, flush_group, bits, iterations, value, record);
             }
         }
 
-        const int64_t stage_pos = group == 0 ? pos : 128 + ((group - 1) & 1) * 128 + pos;
+        const int64_t stage_pos = stage_base + (group == 0 ? pos : 128 + ((group - 1) & 1) * 128 + pos);
         for (int64_t h = 0; h < n_heads; ++h) {
             float rotated[128];
             for (int d = 0; d < 128; ++d) {
@@ -11411,36 +11420,54 @@ void ggml_compute_forward_kvarn_materialize(const ggml_compute_params * params, 
     const ggml_tensor * indices = dst->src[2];
     const int bits = ggml_get_op_params_i32(dst, 0);
     const bool value = ggml_get_op_params_i32(dst, 1) != 0;
+    const int64_t stream_start = ggml_get_op_params_i32(dst, 2);
+    const int64_t n_stream = ggml_get_op_params_i32(dst, 3);
     const int64_t n_heads = dst->ne[1];
     const int64_t n_kv = dst->ne[2];
     const int64_t * idx_data = (const int64_t *) indices->data;
-    int64_t live_group = 0;
+    const int64_t n_total_stream = stage->ne[2] / 384;
+    const int64_t groups_per_stream = records->ne[2] / n_total_stream;
+    std::vector<int64_t> live_groups(n_stream, 0);
     for (int64_t i = 0; i < indices->ne[0]; ++i) {
-        live_group = std::max(live_group, idx_data[i] / 128);
+        const int64_t idx = idx_data[i];
+        GGML_ASSERT(idx >= 0);
+        const int64_t group_global = idx / 128;
+        const int64_t stream = group_global / groups_per_stream;
+        if (stream >= stream_start && stream < stream_start + n_stream) {
+            const int64_t group = group_global - stream * groups_per_stream;
+            live_groups[stream - stream_start] = std::max(live_groups[stream - stream_start], group);
+        }
     }
 
-    const int64_t t0 = n_kv * params->ith / params->nth;
-    const int64_t t1 = n_kv * (params->ith + 1) / params->nth;
-    for (int64_t t = t0; t < t1; ++t) {
+    const int64_t n_work = n_kv * n_stream;
+    const int64_t t0 = n_work * params->ith / params->nth;
+    const int64_t t1 = n_work * (params->ith + 1) / params->nth;
+    for (int64_t w = t0; w < t1; ++w) {
+        const int64_t out_stream = w / n_kv;
+        const int64_t stream = stream_start + out_stream;
+        const int64_t live_group = live_groups[out_stream];
+        const int64_t t = w - out_stream * n_kv;
         const int64_t group = t / 128;
         const int64_t pos = t % 128;
+        const int64_t stage_base = stream * 384;
         for (int64_t h = 0; h < n_heads; ++h) {
             float rotated[128] = {};
             if (group == 0 || (group > 0 && group <= live_group && group + 1 >= live_group)) {
-                const int64_t stage_pos = group == 0 ? pos : 128 + ((group - 1) & 1) * 128 + pos;
+                const int64_t stage_pos = stage_base + (group == 0 ? pos : 128 + ((group - 1) & 1) * 128 + pos);
                 for (int d = 0; d < 128; ++d) {
                     const char * src = (const char *) stage->data + d * stage->nb[0] + h * stage->nb[1] + stage_pos * stage->nb[2];
                     rotated[d] = ggml_fp16_to_fp32(*(const ggml_fp16_t *) src);
                 }
             } else if (group < live_group) {
-                const uint8_t * record = (const uint8_t *) records->data + h * records->nb[1] + group * records->nb[2];
+                const int64_t record_group = stream * groups_per_stream + group;
+                const uint8_t * record = (const uint8_t *) records->data + h * records->nb[1] + record_group * records->nb[2];
                 for (int d = 0; d < 128; ++d) {
                     rotated[d] = kvarn_cpu_record_value(record, bits, value, pos, d);
                 }
             }
             kvarn_cpu_hadamard(rotated);
             for (int d = 0; d < 128; ++d) {
-                char * out = (char *) dst->data + d * dst->nb[0] + h * dst->nb[1] + t * dst->nb[2];
+                char * out = (char *) dst->data + d * dst->nb[0] + h * dst->nb[1] + t * dst->nb[2] + out_stream * dst->nb[3];
                 *(ggml_fp16_t *) out = ggml_fp32_to_fp16(rotated[d]);
             }
         }

@@ -91,13 +91,13 @@ ggml_type llama_kv_cache_kvarn_context::type_v() const {
 ggml_tensor * llama_kv_cache_kvarn_context::get_k(ggml_context * ctx, int32_t il) const {
     const auto it = stored_k.find(cache->mapped_layer_id(il));
     GGML_ASSERT(it != stored_k.end());
-    return cache->materialize(ctx, it->second, il, get_n_kv(), false);
+    return cache->materialize(ctx, it->second, il, get_n_kv(), current_sinfo(), false);
 }
 
 ggml_tensor * llama_kv_cache_kvarn_context::get_v(ggml_context * ctx, int32_t il) const {
     const auto it = stored_v.find(cache->mapped_layer_id(il));
     GGML_ASSERT(it != stored_v.end());
-    return cache->materialize(ctx, it->second, il, get_n_kv(), true);
+    return cache->materialize(ctx, it->second, il, get_n_kv(), current_sinfo(), true);
 }
 
 ggml_tensor * llama_kv_cache_kvarn_context::get_turbo_rotation() const {
@@ -215,6 +215,8 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
     model(model),
     hparams(hparams),
     params(params),
+    n_stream(unified ? 1u : n_seq_max),
+    n_groups_per_stream((kv_size + KVAR_N_GROUP - 1) / KVAR_N_GROUP),
     metadata(std::make_unique<llama_kv_cache>(
         model,
         hparams,
@@ -230,6 +232,9 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         swa_type,
         [](int32_t) { return false; },
         nullptr)) {
+    GGML_ASSERT(n_stream > 0);
+    GGML_ASSERT(kv_size % KVAR_N_GROUP == 0);
+
     struct buft_comparator {
         bool operator()(ggml_backend_buffer_type_t lhs, ggml_backend_buffer_type_t rhs) const {
             return std::strcmp(ggml_backend_buft_name(lhs), ggml_backend_buft_name(rhs)) < 0;
@@ -245,7 +250,7 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         }
 
         ggml_init_params ctx_params = {
-            /*.mem_size   =*/ size_t(4 * hparams.n_layer_kv() * ggml_tensor_overhead()),
+            /*.mem_size   =*/ size_t((4u + 4u * n_stream) * hparams.n_layer_kv() * ggml_tensor_overhead()),
             /*.mem_buffer =*/ nullptr,
             /*.no_alloc   =*/ true,
         };
@@ -259,9 +264,10 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         return result;
     };
 
-    const uint32_t n_groups = (kv_size + KVAR_N_GROUP - 1) / KVAR_N_GROUP;
     const size_t k_record_size = kvarn_record_bytes(params.key_bits);
     const size_t v_record_size = kvarn_record_bytes(params.value_bits);
+    const int64_t n_record_groups = int64_t(n_groups_per_stream) * n_stream;
+    const int64_t n_stage_tokens = int64_t(KVAR_N_GROUP) * KVAR_N_STAGE_GROUPS * n_stream;
     size_t raw_bytes = 0;
 
     for (uint32_t il = 0; il < hparams.n_layer; ++il) {
@@ -299,15 +305,57 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
 
         const uint32_t n_head_k_sliced = n_head_kv * (uint32_t) k_slices;
         const uint32_t n_head_v_sliced = n_head_kv * (uint32_t) v_slices;
-        auto * k_records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, k_record_size, n_head_k_sliced, n_groups);
-        auto * v_records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, v_record_size, n_head_v_sliced, n_groups);
-        auto * k_stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_k_sliced, KVAR_N_GROUP * KVAR_N_STAGE_GROUPS);
-        auto * v_stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_v_sliced, KVAR_N_GROUP * KVAR_N_STAGE_GROUPS);
+        auto * k_records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, k_record_size, n_head_k_sliced, n_record_groups);
+        auto * v_records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, v_record_size, n_head_v_sliced, n_record_groups);
+        auto * k_stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_k_sliced, n_stage_tokens);
+        auto * v_stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_v_sliced, n_stage_tokens);
 
         ggml_format_name(k_records, "cache_kvarn_k_records_l%d", il);
         ggml_format_name(v_records, "cache_kvarn_v_records_l%d", il);
         ggml_format_name(k_stage, "cache_kvarn_k_stage_l%d", il);
         ggml_format_name(v_stage, "cache_kvarn_v_stage_l%d", il);
+
+        std::vector<ggml_tensor *> k_records_stream;
+        std::vector<ggml_tensor *> v_records_stream;
+        std::vector<ggml_tensor *> k_stage_stream;
+        std::vector<ggml_tensor *> v_stage_stream;
+        k_records_stream.reserve(n_stream);
+        v_records_stream.reserve(n_stream);
+        k_stage_stream.reserve(n_stream);
+        v_stage_stream.reserve(n_stream);
+
+        for (uint32_t s = 0; s < n_stream; ++s) {
+            auto * k_records_view = ggml_view_3d(
+                    ctx, k_records,
+                    k_record_size, n_head_k_sliced, n_groups_per_stream,
+                    k_records->nb[1], k_records->nb[2],
+                    size_t(s) * n_groups_per_stream * k_records->nb[2]);
+            auto * v_records_view = ggml_view_3d(
+                    ctx, v_records,
+                    v_record_size, n_head_v_sliced, n_groups_per_stream,
+                    v_records->nb[1], v_records->nb[2],
+                    size_t(s) * n_groups_per_stream * v_records->nb[2]);
+            auto * k_stage_view = ggml_view_3d(
+                    ctx, k_stage,
+                    KVAR_N_GROUP, n_head_k_sliced, KVAR_N_GROUP * KVAR_N_STAGE_GROUPS,
+                    k_stage->nb[1], k_stage->nb[2],
+                    size_t(s) * KVAR_N_GROUP * KVAR_N_STAGE_GROUPS * k_stage->nb[2]);
+            auto * v_stage_view = ggml_view_3d(
+                    ctx, v_stage,
+                    KVAR_N_GROUP, n_head_v_sliced, KVAR_N_GROUP * KVAR_N_STAGE_GROUPS,
+                    v_stage->nb[1], v_stage->nb[2],
+                    size_t(s) * KVAR_N_GROUP * KVAR_N_STAGE_GROUPS * v_stage->nb[2]);
+
+            ggml_format_name(k_records_view, "cache_kvarn_k_records_l%d_s%d", il, s);
+            ggml_format_name(v_records_view, "cache_kvarn_v_records_l%d_s%d", il, s);
+            ggml_format_name(k_stage_view, "cache_kvarn_k_stage_l%d_s%d", il, s);
+            ggml_format_name(v_stage_view, "cache_kvarn_v_stage_l%d_s%d", il, s);
+
+            k_records_stream.push_back(k_records_view);
+            v_records_stream.push_back(v_records_view);
+            k_stage_stream.push_back(k_stage_view);
+            v_stage_stream.push_back(v_stage_view);
+        }
 
         map_layer_ids[il] = layers.size();
         layers.push_back({
@@ -321,9 +369,13 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
             v_records,
             k_stage,
             v_stage,
+            std::move(k_records_stream),
+            std::move(v_records_stream),
+            std::move(k_stage_stream),
+            std::move(v_stage_stream),
         });
 
-        raw_bytes += size_t(kv_size) * n_head_kv * (head_dim_k + head_dim_v) * sizeof(ggml_fp16_t);
+        raw_bytes += size_t(kv_size) * n_stream * n_head_kv * (head_dim_k + head_dim_v) * sizeof(ggml_fp16_t);
     }
 
     if (reuse) {
@@ -375,8 +427,8 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         ctxs_bufs.emplace_back(std::move(ctx), buf);
     }
 
-    LLAMA_LOG_INFO("%s: type = %s, layers = %zu, groups = %u, KVarN = %.2f MiB, equivalent F16 = %.2f MiB\n",
-            __func__, llama_kvarn_type_name(params.type), layers.size(), n_groups,
+    LLAMA_LOG_INFO("%s: type = %s, layers = %zu, groups/stream = %u, streams = %u, KVarN = %.2f MiB, equivalent F16 = %.2f MiB\n",
+            __func__, llama_kvarn_type_name(params.type), layers.size(), n_groups_per_stream, n_stream,
             total_bytes / 1024.0 / 1024.0, raw_bytes / 1024.0 / 1024.0);
 }
 
@@ -476,6 +528,32 @@ int llama_kv_cache_kvarn::cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint3
 }
 
 void llama_kv_cache_kvarn::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
+    const uint32_t stream_src = metadata->get_stream_for_seq(seq_id_src);
+    const uint32_t stream_dst = metadata->get_stream_for_seq(seq_id_dst);
+
+    if (stream_src != stream_dst) {
+        bool is_full = true;
+
+        if (p0 > 0 && p0 + 1 < (int) get_kv_size()) {
+            is_full = false;
+        }
+
+        if (p1 > 0 && p1 + 1 < (int) get_kv_size()) {
+            is_full = false;
+        }
+
+        GGML_ASSERT(is_full && "KVarN cross-stream seq_cp() is only supported for full KV buffers");
+
+        LLAMA_LOG_DEBUG("%s: copying KVarN stream %u to stream %u\n", __func__, stream_src, stream_dst);
+
+        for (auto & layer : layers) {
+            ggml_backend_tensor_copy(layer.k_records_stream[stream_src], layer.k_records_stream[stream_dst]);
+            ggml_backend_tensor_copy(layer.v_records_stream[stream_src], layer.v_records_stream[stream_dst]);
+            ggml_backend_tensor_copy(layer.k_stage_stream[stream_src], layer.k_stage_stream[stream_dst]);
+            ggml_backend_tensor_copy(layer.v_stage_stream[stream_src], layer.v_stage_stream[stream_dst]);
+        }
+    }
+
     metadata->seq_cp(seq_id_src, seq_id_dst, p0, p1);
 }
 
@@ -611,25 +689,32 @@ ggml_tensor * llama_kv_cache_kvarn::materialize(
         ggml_tensor * stored,
         int32_t il,
         uint32_t n_kv,
+        const llama_kv_cache::slot_info & sinfo,
         bool value) const {
     const auto & layer = layer_for(il);
+    const uint32_t stream_start = sinfo.s0;
+    const uint32_t stream_count = sinfo.s1 - sinfo.s0 + 1;
+
     ggml_tensor * result = ggml_kvarn_materialize(
         ctx,
         value ? layer.v_records : layer.k_records,
         stored,
         stored->src[1],
         n_kv,
+        stream_start,
+        stream_count,
         value ? params.value_bits : params.key_bits,
         value);
 
     const uint32_t slices = value ? layer.v_slices : layer.k_slices;
     if (slices > 1) {
-        result = ggml_reshape_3d(
+        result = ggml_reshape_4d(
                 ctx,
                 result,
                 value ? layer.head_dim_v : layer.head_dim_k,
                 layer.n_head_kv,
-                n_kv);
+                n_kv,
+                stream_count);
     }
 
     return result;

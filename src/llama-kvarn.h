@@ -32,6 +32,7 @@ struct llama_kvarn_runtime_requirements {
     bool attention_supported;
     bool head_dims_supported;
     uint32_t n_seq_max;
+    bool kv_unified;
 };
 
 LLAMA_API size_t llama_kvarn_type_count();

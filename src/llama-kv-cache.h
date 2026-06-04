@@ -162,6 +162,7 @@ public:
 
     uint32_t get_size()     const;
     uint32_t get_n_stream() const;
+    uint32_t get_stream_for_seq(llama_seq_id seq_id) const;
 
     // return all cell indices for seq_id at the given position
     std::vector<uint32_t> cells_at(llama_seq_id seq_id, llama_pos p) const;

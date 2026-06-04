@@ -2635,6 +2635,8 @@ extern "C" {
             struct ggml_tensor  * stage_after_store,
             struct ggml_tensor  * indices,
             int                   n_kv,
+            int                   stream_start,
+            int                   n_stream,
             int                   bits,
             bool                  value);
 

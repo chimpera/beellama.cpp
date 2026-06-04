@@ -2146,8 +2146,8 @@ int main(int argc, char ** argv) {
     ok &= expect(speculative.find("llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, pos_min_by_seq[seq_id], -1);") != std::string::npos,
         "ordinary draft-simple process must roll draft KV back before replaying overlapping verifier batches");
     ok &= expect(server_cpp.find("params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED") != std::string::npos &&
-                 server_cpp.find("n_parallel is set to auto with KVarN, using n_parallel = 1") != std::string::npos,
-        "server auto n_parallel must keep KVarN within its single-sequence runtime contract");
+                 server_cpp.find("n_parallel is set to auto with KVarN, using n_parallel = 4 and kv_unified = false") != std::string::npos,
+        "server auto n_parallel must use non-unified streams for multi-sequence KVarN");
 
     return ok ? 0 : 1;
 }

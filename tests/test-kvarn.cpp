@@ -106,6 +106,7 @@ static void test_runtime_validation() {
     supported.attention_supported = true;
     supported.head_dims_supported = true;
     supported.n_seq_max = 1;
+    supported.kv_unified = true;
 
     for (int type = LLAMA_KVARN_K2V2_G128; type <= LLAMA_KVARN_K4V4_G128; ++type) {
         const auto params = llama_kvarn_params_for_type((llama_kvarn_type) type);
@@ -132,8 +133,13 @@ static void test_runtime_validation() {
 
     requirements = supported;
     requirements.n_seq_max = 2;
+    requirements.kv_unified = false;
+    require(llama_kvarn_validate_runtime(llama_kvarn_params_for_type(LLAMA_KVARN_K4V2_G128), requirements) == nullptr,
+            "non-unified multi-sequence runtime rejected");
+
+    requirements.kv_unified = true;
     require(llama_kvarn_validate_runtime(llama_kvarn_params_for_type(LLAMA_KVARN_K4V2_G128), requirements) != nullptr,
-            "multi-sequence runtime accepted");
+            "unified multi-sequence runtime accepted");
 }
 
 static void test_pack_roundtrip(int bits) {
@@ -247,7 +253,7 @@ static void test_cache_ops(enum ggml_backend_dev_type device_type, bool required
     ggml_tensor * records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, record_bytes, n_heads, 4);
 
     ggml_tensor * stored = ggml_kvarn_store(ctx, current, indices, stage, records, bits, 16, false);
-    ggml_tensor * materialized = ggml_kvarn_materialize(ctx, records, stored, indices, n_tokens, bits, false);
+    ggml_tensor * materialized = ggml_kvarn_materialize(ctx, records, stored, indices, n_tokens, 0, 1, bits, false);
 
     ggml_cgraph * graph = ggml_new_graph(ctx);
     ggml_build_forward_expand(graph, stored);
@@ -320,6 +326,123 @@ static void test_cache_ops(enum ggml_backend_dev_type device_type, bool required
     ggml_backend_free(backend);
 }
 
+static void test_cache_ops_multi_stream(enum ggml_backend_dev_type device_type, bool required) {
+    ggml_backend_t backend = ggml_backend_init_by_type(device_type, nullptr);
+    if (backend == nullptr && !required) {
+        return;
+    }
+    require(backend != nullptr, "failed to initialize requested backend");
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ 8 * 1024 * 1024,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    require(ctx != nullptr, "failed to initialize ggml context");
+
+    constexpr int bits = 3;
+    constexpr int n_stream = 2;
+    constexpr int kv_size = 512;
+    constexpr int n_groups_per_stream = kv_size / 128;
+    constexpr int n_tokens_per_stream = 385;
+    constexpr int n_tokens = n_tokens_per_stream * n_stream;
+    constexpr int n_heads = 1;
+    const int record_bytes = int(llama_kvarn_packed_bytes(128 * 128, bits) + 3 * 128 * sizeof(ggml_fp16_t));
+
+    ggml_tensor * current = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 128, n_heads, n_tokens);
+    ggml_tensor * indices = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, n_tokens);
+    ggml_tensor * stage = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 128, n_heads, 384 * n_stream);
+    ggml_tensor * records = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, record_bytes, n_heads, n_groups_per_stream * n_stream);
+
+    ggml_tensor * stored = ggml_kvarn_store(ctx, current, indices, stage, records, bits, 16, false);
+    ggml_tensor * materialized = ggml_kvarn_materialize(
+            ctx, records, stored, indices, n_tokens_per_stream, 0, n_stream, bits, false);
+
+    ggml_cgraph * graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, stored);
+    ggml_build_forward_expand(graph, materialized);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    require(buffer != nullptr, "failed to allocate multi-stream KVarN tensors");
+
+    std::vector<float> input(128 * n_heads * n_tokens);
+    for (int s = 0; s < n_stream; ++s) {
+        for (int t = 0; t < n_tokens_per_stream; ++t) {
+            for (int d = 0; d < 128; ++d) {
+                input[(s * n_tokens_per_stream + t) * 128 + d] =
+                    std::sin(float(d) * 0.071f + float(s) * 0.31f) +
+                    std::cos(float(t) * 0.037f + float(s) * 0.23f) +
+                    float((d * 13 + t * 17 + s * 19) % 31 - 15) * 0.01f;
+            }
+        }
+    }
+    std::vector<int64_t> idx(n_tokens);
+    for (int s = 0; s < n_stream; ++s) {
+        for (int t = 0; t < n_tokens_per_stream; ++t) {
+            idx[s * n_tokens_per_stream + t] = int64_t(s * kv_size + t);
+        }
+    }
+    std::vector<uint8_t> zeros(std::max(ggml_nbytes(stage), ggml_nbytes(records)), 0);
+
+    ggml_backend_tensor_set(current, input.data(), 0, ggml_nbytes(current));
+    ggml_backend_tensor_set(indices, idx.data(), 0, ggml_nbytes(indices));
+    ggml_backend_tensor_set(stage, zeros.data(), 0, ggml_nbytes(stage));
+    ggml_backend_tensor_set(records, zeros.data(), 0, ggml_nbytes(records));
+
+    require(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS, "multi-stream KVarN graph compute failed");
+
+    std::vector<ggml_fp16_t> output_f16(ggml_nelements(materialized));
+    std::vector<float> output(output_f16.size());
+    ggml_backend_tensor_get(materialized, output_f16.data(), 0, ggml_nbytes(materialized));
+    ggml_fp16_to_fp32_row(output_f16.data(), output.data(), output.size());
+
+    for (int s = 0; s < n_stream; ++s) {
+        double sink_error = 0.0;
+        double compressed_error = 0.0;
+        double previous_tail_error = 0.0;
+        double live_tail_error = 0.0;
+        for (int t = 0; t < n_tokens_per_stream; ++t) {
+            for (int d = 0; d < 128; ++d) {
+                const size_t input_off = size_t(s * n_tokens_per_stream + t) * 128 + d;
+                const size_t output_off = size_t(s * n_tokens_per_stream + t) * 128 + d;
+                const double diff = double(input[input_off]) - double(output[output_off]);
+                if (t < 128) {
+                    sink_error += diff * diff;
+                } else if (t < 256) {
+                    compressed_error += diff * diff;
+                } else if (t < 384) {
+                    previous_tail_error += diff * diff;
+                } else {
+                    live_tail_error += diff * diff;
+                }
+            }
+        }
+        sink_error = std::sqrt(sink_error / (128 * 128));
+        compressed_error = std::sqrt(compressed_error / (128 * 128));
+        previous_tail_error = std::sqrt(previous_tail_error / (128 * 128));
+        live_tail_error = std::sqrt(live_tail_error / 128);
+        require(sink_error < 0.01, "multi-stream sink reconstruction error too high");
+        require(compressed_error < 0.25, "multi-stream compressed reconstruction error too high");
+        require(previous_tail_error < 0.01, "multi-stream previous tail reconstruction error too high");
+        require(live_tail_error < 0.01, "multi-stream live tail reconstruction error too high");
+    }
+
+    std::vector<uint8_t> record_data(ggml_nbytes(records));
+    ggml_backend_tensor_get(records, record_data.data(), 0, record_data.size());
+    const size_t stream_record_bytes = size_t(record_bytes) * n_groups_per_stream * n_heads;
+    for (int s = 0; s < n_stream; ++s) {
+        const auto begin = record_data.begin() + ptrdiff_t(s * stream_record_bytes);
+        const auto end = begin + ptrdiff_t(stream_record_bytes);
+        require(std::any_of(begin, end, [](uint8_t v) { return v != 0; }),
+                "multi-stream completed group was not flushed");
+    }
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+}
+
 int main() {
     ggml_backend_load_all();
 
@@ -337,6 +460,8 @@ int main() {
     }
     test_cache_ops(GGML_BACKEND_DEVICE_TYPE_CPU, true);
     test_cache_ops(GGML_BACKEND_DEVICE_TYPE_GPU, false);
+    test_cache_ops_multi_stream(GGML_BACKEND_DEVICE_TYPE_CPU, true);
+    test_cache_ops_multi_stream(GGML_BACKEND_DEVICE_TYPE_GPU, false);
 
     std::printf("test-kvarn: all tests OK\n");
     return 0;

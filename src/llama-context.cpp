@@ -8380,6 +8380,7 @@ llama_context * llama_init_from_model(
                 /*.attention_supported =*/ attention_supported,
                 /*.head_dims_supported =*/ head_dims_supported,
                 /*.n_seq_max           =*/ std::max(1u, params.n_seq_max),
+                /*.kv_unified          =*/ params.kv_unified,
             };
 
             if (const char * reason = llama_kvarn_validate_runtime(params.kvarn, requirements)) {

@@ -1368,6 +1368,11 @@ uint32_t llama_kv_cache::get_n_stream() const {
     return n_stream;
 }
 
+uint32_t llama_kv_cache::get_stream_for_seq(llama_seq_id seq_id) const {
+    GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
+    return seq_to_stream[seq_id];
+}
+
 bool llama_kv_cache::get_has_shift() const {
     bool result = false;
 

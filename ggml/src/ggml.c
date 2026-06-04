@@ -6468,10 +6468,12 @@ struct ggml_tensor * ggml_kvarn_store(
     GGML_ASSERT(stage->type == GGML_TYPE_F16);
     GGML_ASSERT(records->type == GGML_TYPE_I8);
     GGML_ASSERT(current->ne[0] == 128);
-    GGML_ASSERT(stage->ne[0] == 128 && stage->ne[2] == 384);
+    GGML_ASSERT(stage->ne[0] == 128 && stage->ne[2] % 384 == 0);
     GGML_ASSERT(current->ne[1] == stage->ne[1] && stage->ne[1] == records->ne[1]);
     GGML_ASSERT(current->ne[2] == indices->ne[0]);
     GGML_ASSERT(bits >= 2 && bits <= 4 && sinkhorn_iters > 0);
+    const int64_t n_stream = stage->ne[2] / 384;
+    GGML_ASSERT(n_stream > 0 && records->ne[2] % n_stream == 0);
 
     struct ggml_tensor * result = ggml_view_tensor(ctx, stage);
     result->op = GGML_OP_KVARN_STORE;
@@ -6493,22 +6495,30 @@ struct ggml_tensor * ggml_kvarn_materialize(
         struct ggml_tensor  * stage_after_store,
         struct ggml_tensor  * indices,
         int                   n_kv,
+        int                   stream_start,
+        int                   n_stream,
         int                   bits,
         bool                  value) {
     GGML_ASSERT(records->type == GGML_TYPE_I8);
     GGML_ASSERT(stage_after_store->type == GGML_TYPE_F16);
     GGML_ASSERT(indices->type == GGML_TYPE_I64);
-    GGML_ASSERT(stage_after_store->ne[0] == 128 && stage_after_store->ne[2] == 384);
+    GGML_ASSERT(stage_after_store->ne[0] == 128 && stage_after_store->ne[2] % 384 == 0);
     GGML_ASSERT(stage_after_store->ne[1] == records->ne[1]);
     GGML_ASSERT(n_kv > 0 && bits >= 2 && bits <= 4);
+    const int64_t n_total_stream = stage_after_store->ne[2] / 384;
+    GGML_ASSERT(n_total_stream > 0 && records->ne[2] % n_total_stream == 0);
+    GGML_ASSERT(stream_start >= 0 && n_stream > 0);
+    GGML_ASSERT((int64_t) stream_start + n_stream <= n_total_stream);
 
-    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 128, stage_after_store->ne[1], n_kv);
+    struct ggml_tensor * result = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 128, stage_after_store->ne[1], n_kv, n_stream);
     result->op = GGML_OP_KVARN_MATERIALIZE;
     result->src[0] = records;
     result->src[1] = stage_after_store;
     result->src[2] = indices;
     ggml_set_op_params_i32(result, 0, bits);
     ggml_set_op_params_i32(result, 1, value ? 1 : 0);
+    ggml_set_op_params_i32(result, 2, stream_start);
+    ggml_set_op_params_i32(result, 3, n_stream);
     return result;
 }
 
