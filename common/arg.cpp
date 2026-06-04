@@ -59,6 +59,7 @@ static std::initializer_list<enum llama_example> mmproj_examples = {
     LLAMA_EXAMPLE_CLI,
 };
 
+static void common_params_kvarn_normalize(common_params & params);
 static void common_params_speculative_normalize(common_params & params);
 
 static std::string read_file(const std::string & fname) {
@@ -423,31 +424,77 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
     throw std::runtime_error("Unsupported cache type: " + s);
 }
 
-static std::string get_all_kv_cache_types() {
+static std::string get_all_kv_cache_types(bool include_kvarn_pseudo_types = false) {
     std::ostringstream msg;
     for (const auto & type : kv_cache_types) {
         msg << ggml_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
     }
+    if (include_kvarn_pseudo_types) {
+        msg << ", kvarn2, kvarn3, kvarn4";
+    }
     return msg.str();
 }
 
-static llama_kvarn_type kvarn_type_from_str(const std::string & value) {
-    const llama_kvarn_type type = llama_kvarn_type_from_name(value.c_str());
-    if (type == LLAMA_KVARN_TYPE_INVALID) {
-        throw std::runtime_error("Unsupported KVarN cache type: " + value);
+static int32_t kvarn_bits_from_cache_type(const std::string & value) {
+    if (value == "kvarn2") {
+        return 2;
     }
-    return type;
+    if (value == "kvarn3") {
+        return 3;
+    }
+    if (value == "kvarn4") {
+        return 4;
+    }
+    return 0;
 }
 
-static std::string get_all_kvarn_types() {
-    std::ostringstream msg;
-    for (int type = LLAMA_KVARN_TYPE_DISABLED; type < LLAMA_KVARN_TYPE_COUNT; ++type) {
-        if (type != LLAMA_KVARN_TYPE_DISABLED) {
-            msg << ", ";
+static llama_kvarn_type kvarn_type_from_bits(int32_t key_bits, int32_t value_bits) {
+    switch (key_bits) {
+        case 2:
+            switch (value_bits) {
+                case 2: return LLAMA_KVARN_K2V2_G128;
+                case 3: return LLAMA_KVARN_K2V3_G128;
+                case 4: return LLAMA_KVARN_K2V4_G128;
+            }
+            break;
+        case 3:
+            switch (value_bits) {
+                case 2: return LLAMA_KVARN_K3V2_G128;
+                case 3: return LLAMA_KVARN_K3V3_G128;
+                case 4: return LLAMA_KVARN_K3V4_G128;
+            }
+            break;
+        case 4:
+            switch (value_bits) {
+                case 2: return LLAMA_KVARN_K4V2_G128;
+                case 3: return LLAMA_KVARN_K4V3_G128;
+                case 4: return LLAMA_KVARN_K4V4_G128;
+            }
+            break;
+    }
+    return LLAMA_KVARN_TYPE_INVALID;
+}
+
+static void parse_target_cache_type(common_params & params, bool key, const std::string & value) {
+    const int32_t kvarn_bits = kvarn_bits_from_cache_type(value);
+    if (kvarn_bits != 0) {
+        if (key) {
+            params.cache_kvarn_bits_k = kvarn_bits;
+            params.cache_type_k       = GGML_TYPE_F16;
+        } else {
+            params.cache_kvarn_bits_v = kvarn_bits;
+            params.cache_type_v       = GGML_TYPE_F16;
         }
-        msg << llama_kvarn_type_name(static_cast<llama_kvarn_type>(type));
+        return;
     }
-    return msg.str();
+
+    if (key) {
+        params.cache_kvarn_bits_k = 0;
+        params.cache_type_k       = kv_cache_type_from_str(value);
+    } else {
+        params.cache_kvarn_bits_v = 0;
+        params.cache_type_v       = kv_cache_type_from_str(value);
+    }
 }
 
 static bool parse_bool_value(const std::string & value) {
@@ -668,6 +715,7 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
 
     postprocess_cpu_params(params.speculative.draft.cpuparams,       &params.cpuparams);
     postprocess_cpu_params(params.speculative.draft.cpuparams_batch, &params.cpuparams_batch);
+    common_params_kvarn_normalize(params);
     common_params_speculative_normalize(params);
 
     if (params.prompt_cache_all && (params.interactive || params.interactive_first)) {
@@ -974,6 +1022,43 @@ bool common_params_to_map(int argc, char ** argv, llama_example ex, std::map<com
     }
 
     return true;
+}
+
+static void common_params_kvarn_normalize(common_params & params) {
+    int32_t key_bits   = params.cache_kvarn_bits_k;
+    int32_t value_bits = params.cache_kvarn_bits_v;
+
+    if (key_bits == 0 && value_bits == 0) {
+        return;
+    }
+
+    if (key_bits == 0) {
+        LOG_WRN("warning: --cache-type-v uses KVarN but --cache-type-k is %s; forcing K to kvarn%d\n",
+                ggml_type_name(params.cache_type_k), value_bits);
+        key_bits = value_bits;
+    } else if (value_bits == 0) {
+        LOG_WRN("warning: --cache-type-k uses KVarN but --cache-type-v is %s; forcing V to kvarn%d\n",
+                ggml_type_name(params.cache_type_v), key_bits);
+        value_bits = key_bits;
+    }
+
+    const llama_kvarn_type type = kvarn_type_from_bits(key_bits, value_bits);
+    if (type == LLAMA_KVARN_TYPE_INVALID) {
+        throw std::invalid_argument(string_format(
+            "invalid KVarN cache type combination: kvarn%d/kvarn%d", key_bits, value_bits));
+    }
+
+    llama_kvarn_params selected = llama_kvarn_params_for_type(type);
+    selected.sinkhorn_iters      = params.kvarn.sinkhorn_iters;
+    selected.sink_tokens         = params.kvarn.sink_tokens;
+    selected.pool_mem_frac       = params.kvarn.pool_mem_frac;
+    selected.fail_if_unsupported = params.kvarn.fail_if_unsupported;
+    params.kvarn                 = selected;
+
+    params.cache_kvarn_bits_k = key_bits;
+    params.cache_kvarn_bits_v = value_bits;
+    params.cache_type_k       = GGML_TYPE_F16;
+    params.cache_type_v       = GGML_TYPE_F16;
 }
 
 static void common_params_speculative_normalize(common_params & params) {
@@ -2209,11 +2294,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             "KV cache data type for K\n"
             "allowed values: %s\n"
             "(default: %s)",
-            get_all_kv_cache_types().c_str(),
+            get_all_kv_cache_types(/*include_kvarn_pseudo_types =*/ true).c_str(),
             ggml_type_name(params.cache_type_k)
         ),
         [](common_params & params, const std::string & value) {
-            params.cache_type_k = kv_cache_type_from_str(value);
+            parse_target_cache_type(params, /*key =*/ true, value);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_K"));
     add_opt(common_arg(
@@ -2222,32 +2307,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             "KV cache data type for V\n"
             "allowed values: %s\n"
             "(default: %s)",
-            get_all_kv_cache_types().c_str(),
+            get_all_kv_cache_types(/*include_kvarn_pseudo_types =*/ true).c_str(),
             ggml_type_name(params.cache_type_v)
         ),
         [](common_params & params, const std::string & value) {
-            params.cache_type_v = kv_cache_type_from_str(value);
+            parse_target_cache_type(params, /*key =*/ false, value);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
-    add_opt(common_arg(
-        {"--kv-kvarn"}, "TYPE",
-        string_format(
-            "KVarN structured KV cache type\n"
-            "allowed values: %s\n"
-            "(default: %s)",
-            get_all_kvarn_types().c_str(),
-            llama_kvarn_type_name(params.kvarn.type)
-        ),
-        [](common_params & params, const std::string & value) {
-            const llama_kvarn_type type = kvarn_type_from_str(value);
-            llama_kvarn_params selected = llama_kvarn_params_for_type(type);
-            selected.sinkhorn_iters      = params.kvarn.sinkhorn_iters;
-            selected.sink_tokens         = params.kvarn.sink_tokens;
-            selected.pool_mem_frac       = params.kvarn.pool_mem_frac;
-            selected.fail_if_unsupported = params.kvarn.fail_if_unsupported;
-            params.kvarn = selected;
-        }
-    ).set_env("LLAMA_ARG_KV_KVARN"));
     add_opt(common_arg(
         {"--kv-kvarn-sink-tokens"}, "N",
         string_format("KVarN uncompressed sink tokens per sequence (currently fixed at 128, default: %d)", params.kvarn.sink_tokens),
