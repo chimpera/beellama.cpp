@@ -1034,6 +1034,8 @@ struct server_adaptive_dm_state {
     }
 
     int profit_next_unready_explore_depth(int current_n, int base_n_max, int explore_step) const {
+        (void) explore_step;
+
         if (profit_should_skip_active_explore(current_n, base_n_max)) {
             return 0;
         }
@@ -1045,9 +1047,8 @@ struct server_adaptive_dm_state {
             return 0;
         }
 
-        const int start = std::max(1, explore_step) - 1;
-        for (int offset = 0; offset < n_ordered; ++offset) {
-            const int candidate = ordered[(start + offset) % n_ordered];
+        for (int i = 0; i < n_ordered; ++i) {
+            const int candidate = ordered[i];
             if (candidate > 0 && !profit_explore_probe_depth_ready(candidate, current_n, base_n_max)) {
                 return candidate;
             }
@@ -1056,12 +1057,18 @@ struct server_adaptive_dm_state {
     }
 
     bool profit_explore_probe_depth_ready(int depth, int current_n, int base_n_max) const {
-        if (profit_request_requires_fresh_switch_sample &&
-                depth > 0 &&
-                depth != current_n) {
-            return profit_depth_ready_since_request(depth, profit_candidate_min_samples(base_n_max));
+        if (depth <= 0 || depth >= PROFIT_DEPTHS) {
+            return false;
         }
-        return profit_ladder_probe_depth_ready(depth);
+
+        const int min_samples = profit_candidate_min_samples(base_n_max);
+        if (profit_request_measure_depths ||
+                (profit_request_requires_fresh_switch_sample && depth != current_n)) {
+            return profit_depth_ready_since_request(depth, min_samples);
+        }
+        return profit_depth[depth].samples >= min_samples &&
+            profit_depth[depth].total_cycle_ms > 0.0 &&
+            profit_depth[depth].total_output_tokens > 0.0;
     }
 
     bool profit_ladder_probe_depth_ready(int depth) const {

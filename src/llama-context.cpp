@@ -8355,6 +8355,11 @@ llama_context * llama_init_from_model(
             LLAMA_LOG_WARN("%s: KVarN is target-context-only; disabling it for this auxiliary context\n", __func__);
             params.kvarn = llama_kvarn_default_params();
         } else {
+            if (params.kv_unified) {
+                LLAMA_LOG_WARN("%s: KVarN requires non-unified KV streams; forcing kv_unified=false\n", __func__);
+                params.kv_unified = false;
+            }
+
             bool head_dims_supported = true;
             for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
                 if (!model->hparams.has_kv(il)) {

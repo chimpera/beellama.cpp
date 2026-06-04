@@ -100,6 +100,24 @@ int main() {
     }
 
     {
+        server_adaptive_dm_state explore_confirm;
+        explore_confirm.dm_profit_min_samples = 3;
+        explore_confirm.adaptive_n_max = 15;
+        explore_confirm.profit_last_recommended_n = 15;
+
+        for (int i = 0; i < 3; ++i) {
+            observe_profit_cycle(explore_confirm, 14, 14, 2, 80.0f);
+        }
+        assert(explore_confirm.profit_next_unready_explore_depth(15, 15, 1) == 14);
+        assert(explore_confirm.profit_next_unready_explore_depth(15, 15, 2) == 14);
+
+        for (int i = 0; i < 3; ++i) {
+            observe_profit_cycle(explore_confirm, 14, 14, 2, 80.0f);
+        }
+        assert(explore_confirm.profit_next_unready_explore_depth(15, 15, 1) == 13);
+    }
+
+    {
         server_adaptive_dm_state strong_max;
         strong_max.dm_profit_min_samples = 1;
         strong_max.adaptive_n_max = 15;

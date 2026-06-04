@@ -106,7 +106,7 @@ static void test_runtime_validation() {
     supported.attention_supported = true;
     supported.head_dims_supported = true;
     supported.n_seq_max = 1;
-    supported.kv_unified = true;
+    supported.kv_unified = false;
 
     for (int type = LLAMA_KVARN_K2V2_G128; type <= LLAMA_KVARN_K4V4_G128; ++type) {
         const auto params = llama_kvarn_params_for_type((llama_kvarn_type) type);
@@ -130,6 +130,11 @@ static void test_runtime_validation() {
     requirements.head_dims_supported = false;
     require(llama_kvarn_validate_runtime(llama_kvarn_params_for_type(LLAMA_KVARN_K4V2_G128), requirements) != nullptr,
             "unsupported head dimension accepted");
+
+    requirements = supported;
+    requirements.kv_unified = true;
+    require(llama_kvarn_validate_runtime(llama_kvarn_params_for_type(LLAMA_KVARN_K4V2_G128), requirements) != nullptr,
+            "unified single-sequence runtime accepted");
 
     requirements = supported;
     requirements.n_seq_max = 2;

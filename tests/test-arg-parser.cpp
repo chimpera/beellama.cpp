@@ -188,7 +188,16 @@ int main(void) {
     assert(params.cache_kvarn_bits_v == 2);
     assert(params.cache_type_k == GGML_TYPE_F16);
     assert(params.cache_type_v == GGML_TYPE_F16);
+    assert(!params.kv_unified);
     assert(common_context_params_to_llama(params).kvarn.type == LLAMA_KVARN_K4V2_G128);
+    assert(!common_context_params_to_llama(params).kv_unified);
+
+    params = common_params();
+    argv = {"binary_name", "-m", "model_file.gguf", "--kv-unified", "--cache-type-k", "kvarn4"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.kvarn.type == LLAMA_KVARN_K4V4_G128);
+    assert(!params.kv_unified);
+    assert(!common_context_params_to_llama(params).kv_unified);
 
     params = common_params();
     argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn3"};

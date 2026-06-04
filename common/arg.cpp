@@ -1059,6 +1059,11 @@ static void common_params_kvarn_normalize(common_params & params) {
     params.cache_kvarn_bits_v = value_bits;
     params.cache_type_k       = GGML_TYPE_F16;
     params.cache_type_v       = GGML_TYPE_F16;
+
+    if (params.kv_unified) {
+        LOG_WRN("%s", "warning: KVarN requires non-unified KV streams; forcing --no-kv-unified\n");
+        params.kv_unified = false;
+    }
 }
 
 static void common_params_speculative_normalize(common_params & params) {

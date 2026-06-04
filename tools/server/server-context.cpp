@@ -2357,9 +2357,12 @@ private:
             recurrent_expanded = false;
             recurrent_backup_sequences = true;
 
-            if (!params_base.kv_unified && n_parallel_user == 1) {
+            if (!params_base.kv_unified && n_parallel_user == 1 &&
+                    params_base.kvarn.type == LLAMA_KVARN_TYPE_DISABLED) {
                 params_base.kv_unified = true;
                 SRV_INF("%s", "auto-enabled kv-unified: spec decode backup doesn't need separate KV stream\n");
+            } else if (!params_base.kv_unified && n_parallel_user == 1) {
+                SRV_WRN("%s", "KVarN requires non-unified KV; keeping separate KV streams for speculative backup\n");
             }
         }
 
@@ -2409,6 +2412,7 @@ private:
             params_dft.n_gpu_layers = params_spec.n_gpu_layers;
             params_dft.cache_type_k = params_spec.cache_type_k;
             params_dft.cache_type_v = params_spec.cache_type_v;
+            params_dft.kvarn        = llama_kvarn_default_params();
 
             const bool draft_type_is_dflash = params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH;
             ggml_backend_dev_t explicit_single_draft_dev = server_single_gpu_device_from_list(params_spec.devices);

@@ -1835,6 +1835,9 @@ int main(int argc, char ** argv) {
                  server_context.find("dflash_draft_ctx_per_slot * dflash_draft_slots_clamped") != std::string::npos &&
                  server_context.find("params_dft.kv_unified = false") != std::string::npos,
         "DFlash drafter KV retention must use partitioned per-slot context, not a unified shared pool");
+    ok &= expect(server_context.find("params_dft.kvarn") != std::string::npos &&
+                 server_context.find("llama_kvarn_default_params();") != std::string::npos,
+        "DFlash draft contexts must not inherit target-only KVarN settings");
     ok &= expect(server_context.find("reduced-row-count-mismatch") != std::string::npos,
         "DFlash reduced verifier must reject uneven multi-slot rows so compact output is not overwritten by internal ubatch splits");
     ok &= expect(server_context.find("dflash_shared_drafter_batch_allowed") != std::string::npos &&
@@ -2146,8 +2149,11 @@ int main(int argc, char ** argv) {
     ok &= expect(speculative.find("llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, pos_min_by_seq[seq_id], -1);") != std::string::npos,
         "ordinary draft-simple process must roll draft KV back before replaying overlapping verifier batches");
     ok &= expect(server_cpp.find("params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED") != std::string::npos &&
-                 server_cpp.find("n_parallel is set to auto with KVarN, using n_parallel = 4 and kv_unified = false") != std::string::npos,
+                 server_cpp.find("n_parallel is set to auto with KVarN; KVarN requires non-unified KV") != std::string::npos,
         "server auto n_parallel must use non-unified streams for multi-sequence KVarN");
+    ok &= expect(server_context.find("params_base.kvarn.type == LLAMA_KVARN_TYPE_DISABLED") != std::string::npos &&
+                 server_context.find("KVarN requires non-unified KV; keeping separate KV streams for speculative backup") != std::string::npos,
+        "DFlash recurrent backup auto-unification must not override KVarN non-unified streams");
 
     return ok ? 0 : 1;
 }
