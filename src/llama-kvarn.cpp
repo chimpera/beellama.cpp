@@ -413,7 +413,7 @@ static void llama_kvarn_quantize_tile(
         llama_kvarn_store_fp16(record, other_axis_offset, i, s_col[i]);
     }
 
-    assert(payload_bytes == llama_kvarn_packed_bytes(128 * 128, bits));
+    GGML_ASSERT(payload_bytes == llama_kvarn_packed_bytes(128 * 128, bits));
     llama_kvarn_pack_bits(q.data(), 128 * 128, bits, payload);
 }
 
