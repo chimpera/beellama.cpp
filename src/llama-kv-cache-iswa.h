@@ -108,7 +108,6 @@ public:
 
     // used to create a batch processing context from a batch
     llama_kv_cache_iswa_context(
-            llama_kv_cache_iswa * kv,
             llama_memory_context_ptr ctx_base_in,
             llama_memory_context_ptr ctx_swa_in,
             std::vector<llama_ubatch> ubatches);

@@ -233,7 +233,6 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         llama_swa_type swa_type,
         const layer_filter_cb & filter,
         const layer_reuse_cb & reuse) :
-    model(model),
     hparams(hparams),
     params(params),
     n_stream(unified ? 1u : n_seq_max),
@@ -565,11 +564,11 @@ void llama_kv_cache_kvarn::seq_keep(llama_seq_id seq_id) {
     metadata->seq_keep(seq_id);
 }
 
-void llama_kv_cache_kvarn::seq_add(llama_seq_id, llama_pos, llama_pos, llama_pos) {
+GGML_NORETURN void llama_kv_cache_kvarn::seq_add(llama_seq_id, llama_pos, llama_pos, llama_pos) {
     GGML_ABORT("KVarN does not support position shifts");
 }
 
-void llama_kv_cache_kvarn::seq_div(llama_seq_id, llama_pos, llama_pos, int) {
+GGML_NORETURN void llama_kv_cache_kvarn::seq_div(llama_seq_id, llama_pos, llama_pos, int) {
     GGML_ABORT("KVarN does not support position division");
 }
 

@@ -210,7 +210,7 @@ llama_memory_context_ptr llama_kv_cache_iswa::init_batch(llama_batch_allocr & ba
         }
 
         return std::make_unique<llama_kv_cache_iswa_context>(
-                this, std::move(ctx_base), std::move(ctx_swa), std::move(ubatches));
+                std::move(ctx_base), std::move(ctx_swa), std::move(ubatches));
     } while (false);
 
     // if it fails, try equal split
@@ -244,7 +244,7 @@ llama_memory_context_ptr llama_kv_cache_iswa::init_batch(llama_batch_allocr & ba
         }
 
         return std::make_unique<llama_kv_cache_iswa_context>(
-                this, std::move(ctx_base), std::move(ctx_swa), std::move(ubatches));
+                std::move(ctx_base), std::move(ctx_swa), std::move(ubatches));
     } while (false);
 
     // TODO: if we fail again, we should attempt different splitting strategies
@@ -277,7 +277,7 @@ llama_memory_context_ptr llama_kv_cache_iswa::init_kv_batch(const std::vector<ll
     }
 
     return std::make_unique<llama_kv_cache_iswa_context>(
-            this, std::move(ctx_base), std::move(ctx_swa), ubatches);
+            std::move(ctx_base), std::move(ctx_swa), ubatches);
 }
 
 bool llama_kv_cache_iswa::get_can_shift() const {
@@ -333,7 +333,6 @@ llama_kv_cache_iswa_context::llama_kv_cache_iswa_context(
 }
 
 llama_kv_cache_iswa_context::llama_kv_cache_iswa_context(
-        llama_kv_cache_iswa * kv,
         llama_memory_context_ptr ctx_base_in,
         llama_memory_context_ptr ctx_swa_in,
         std::vector<llama_ubatch> ubatches) :
