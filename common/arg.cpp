@@ -1048,11 +1048,7 @@ static void common_params_kvarn_normalize(common_params & params) {
             "invalid KVarN cache type combination: kvarn%d/kvarn%d", key_bits, value_bits));
     }
 
-    llama_kvarn_params selected = llama_kvarn_params_for_type(type);
-    selected.sinkhorn_iters      = params.kvarn.sinkhorn_iters;
-    selected.sink_tokens         = params.kvarn.sink_tokens;
-    selected.fail_if_unsupported = params.kvarn.fail_if_unsupported;
-    params.kvarn                 = selected;
+    params.kvarn = llama_kvarn_params_for_type(type);
 
     params.cache_kvarn_bits_k = key_bits;
     params.cache_kvarn_bits_v = value_bits;
@@ -2317,33 +2313,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             parse_target_cache_type(params, /*key =*/ false, value);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
-    add_opt(common_arg(
-        {"--kv-kvarn-sink-tokens"}, "N",
-        string_format("KVarN uncompressed sink tokens per sequence (currently fixed at 128, default: %d)", params.kvarn.sink_tokens),
-        [](common_params & params, int value) {
-            if (value != 128) {
-                throw std::invalid_argument("KVarN currently requires exactly 128 sink tokens");
-            }
-            params.kvarn.sink_tokens = value;
-        }
-    ).set_env("LLAMA_ARG_KV_KVARN_SINK_TOKENS"));
-    add_opt(common_arg(
-        {"--kv-kvarn-sinkhorn-iters"}, "N",
-        string_format("KVarN Sinkhorn normalization iterations (default: %d)", params.kvarn.sinkhorn_iters),
-        [](common_params & params, int value) {
-            if (value <= 0) {
-                throw std::invalid_argument("KVarN Sinkhorn iteration count must be positive");
-            }
-            params.kvarn.sinkhorn_iters = value;
-        }
-    ).set_env("LLAMA_ARG_KV_KVARN_SINKHORN_ITERS"));
-    add_opt(common_arg(
-        {"--kv-kvarn-fallback"},
-        "fall back to the normal KV cache when KVarN is unsupported",
-        [](common_params & params) {
-            params.kvarn.fail_if_unsupported = false;
-        }
-    ).set_env("LLAMA_ARG_KV_KVARN_FALLBACK"));
     add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",

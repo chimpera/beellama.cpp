@@ -115,6 +115,14 @@ int main(void) {
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
     params = common_params();
+    argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn4", "--kv-kvarn-sinkhorn-iters", "12"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
+    params = common_params();
+    argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn4", "--kv-kvarn-fallback"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
+    params = common_params();
     argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn4", "--grp-attn-n", "2"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMPLETION));
 
@@ -179,17 +187,14 @@ int main(void) {
         "binary_name", "-m", "model_file.gguf",
         "--cache-type-k", "kvarn4",
         "--cache-type-v", "kvarn2",
-        "--kv-kvarn-sink-tokens", "128",
-        "--kv-kvarn-sinkhorn-iters", "12",
-        "--kv-kvarn-fallback",
     };
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.kvarn.type == LLAMA_KVARN_K4V2_G128);
     assert(params.kvarn.key_bits == 4);
     assert(params.kvarn.value_bits == 2);
     assert(params.kvarn.sink_tokens == 128);
-    assert(params.kvarn.sinkhorn_iters == 12);
-    assert(!params.kvarn.fail_if_unsupported);
+    assert(params.kvarn.sinkhorn_iters == 16);
+    assert(params.kvarn.fail_if_unsupported);
     assert(params.cache_kvarn_bits_k == 4);
     assert(params.cache_kvarn_bits_v == 2);
     assert(params.cache_type_k == GGML_TYPE_F16);
