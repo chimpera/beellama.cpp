@@ -257,16 +257,52 @@ static __device__ uint8_t kvarn_unpack_record(const uint8_t * record, int index,
     return value;
 }
 
-static __global__ void kvarn_materialize_kernel(
-        const uint8_t * records,
-        const half * stage,
+static __global__ void kvarn_live_groups_kernel(
         const int64_t * indices,
-        half * dst,
-        int n_heads,
-        int n_kv,
         int n_indices,
         int stream_start,
         int n_stream,
+        int groups_per_stream,
+        int * live_groups) {
+    const int out_stream = blockIdx.x;
+    if (out_stream >= n_stream) {
+        return;
+    }
+
+    const int stream = stream_start + out_stream;
+    int live_group = 0;
+    for (int i = threadIdx.x; i < n_indices; i += blockDim.x) {
+        const int group_global = (int) (indices[i] / KVAR_N_DIM);
+        const int idx_stream = group_global / groups_per_stream;
+        if (idx_stream == stream) {
+            live_group = max(live_group, group_global - stream * groups_per_stream);
+        }
+    }
+
+    __shared__ int partial[KVAR_N_DIM];
+    partial[threadIdx.x] = live_group;
+    __syncthreads();
+
+    for (int stride = KVAR_N_DIM / 2; stride > 0; stride /= 2) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] = max(partial[threadIdx.x], partial[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        live_groups[out_stream] = partial[0];
+    }
+}
+
+static __global__ void kvarn_materialize_kernel(
+        const uint8_t * records,
+        const half * stage,
+        const int * live_groups,
+        half * dst,
+        int n_heads,
+        int n_kv,
+        int stream_start,
         int groups_per_stream,
         int record_bytes,
         int bits,
@@ -278,19 +314,7 @@ static __global__ void kvarn_materialize_kernel(
     const int stream = stream_start + out_stream;
     const int dim = threadIdx.x;
     __shared__ float rotated[KVAR_N_DIM];
-    __shared__ int live_group;
-
-    if (dim == 0) {
-        live_group = 0;
-        for (int i = 0; i < n_indices; ++i) {
-            const int group_global = (int) (indices[i] / KVAR_N_DIM);
-            const int idx_stream = group_global / groups_per_stream;
-            if (idx_stream == stream) {
-                live_group = max(live_group, group_global - stream * groups_per_stream);
-            }
-        }
-    }
-    __syncthreads();
+    const int live_group = live_groups[out_stream];
 
     const int group = token / KVAR_N_DIM;
     const int pos = token % KVAR_N_DIM;
@@ -366,17 +390,24 @@ void ggml_cuda_op_kvarn_materialize(ggml_backend_cuda_context & ctx, ggml_tensor
     const int n_stream = ggml_get_op_params_i32(dst, 3);
     const int n_total_stream = (int) (stage->ne[2] / (KVAR_N_DIM * KVAR_N_STAGE_GROUPS));
     const int groups_per_stream = (int) (records->ne[2] / n_total_stream);
+    ggml_cuda_pool_alloc<int> live_groups(ctx.pool(), n_stream);
+    kvarn_live_groups_kernel<<<n_stream, KVAR_N_DIM, 0, ctx.stream()>>>(
+        (const int64_t *) indices->data,
+        (int) indices->ne[0],
+        stream_start,
+        n_stream,
+        groups_per_stream,
+        live_groups.get());
+
     const int blocks = (int) (dst->ne[3] * dst->ne[2] * dst->ne[1]);
     kvarn_materialize_kernel<<<blocks, KVAR_N_DIM, 0, ctx.stream()>>>(
         (const uint8_t *) records->data,
         (const half *) stage->data,
-        (const int64_t *) indices->data,
+        live_groups.get(),
         (half *) dst->data,
         (int) dst->ne[1],
         (int) dst->ne[2],
-        (int) indices->ne[0],
         stream_start,
-        n_stream,
         groups_per_stream,
         (int) records->ne[0],
         bits,
