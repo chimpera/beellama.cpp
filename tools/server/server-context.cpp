@@ -11,6 +11,7 @@
 #include "build-info.h"
 #include "common.h"
 #include "fit.h"
+#include "gguf.h"
 #include "llama.h"
 #include "log.h"
 #include "sampling.h"
@@ -74,6 +75,75 @@ static bool dflash_shared_drafter_batch_disabled() {
         return env && env[0] != '\0' && strcmp(env, "0") == 0;
     }();
     return disabled;
+}
+
+struct server_model_arch_probe {
+    bool known = false;
+    bool recurrent_or_hybrid = false;
+    std::string name;
+};
+
+static bool server_arch_name_is_recurrent_or_hybrid(const std::string & name) {
+    static const std::set<std::string> recurrent_or_hybrid = {
+        "mamba",
+        "mamba2",
+        "rwkv6",
+        "rwkv6qwen2",
+        "rwkv7",
+        "arwkv7",
+        "jamba",
+        "falcon-h1",
+        "plamo2",
+        "granitehybrid",
+        "lfm2",
+        "lfm2moe",
+        "nemotron_h",
+        "nemotron_h_moe",
+        "qwen3next",
+        "kimi-linear",
+        "qwen35",
+        "qwen35moe",
+    };
+
+    return recurrent_or_hybrid.find(name) != recurrent_or_hybrid.end();
+}
+
+static server_model_arch_probe server_probe_model_arch(const std::string & path_model) {
+    server_model_arch_probe result;
+
+    if (path_model.empty()) {
+        return result;
+    }
+
+    ggml_context * ctx_meta = nullptr;
+    gguf_init_params gguf_params = {
+        /*.no_alloc =*/ true,
+        /*.ctx      =*/ &ctx_meta,
+    };
+
+    gguf_context * ctx_gguf = gguf_init_from_file(path_model.c_str(), gguf_params);
+    if (!ctx_gguf) {
+        if (ctx_meta) {
+            ggml_free(ctx_meta);
+        }
+        return result;
+    }
+
+    const int64_t key = gguf_find_key(ctx_gguf, "general.architecture");
+    if (key >= 0 && gguf_get_kv_type(ctx_gguf, key) == GGUF_TYPE_STRING) {
+        const char * arch_name = gguf_get_val_str(ctx_gguf, key);
+        if (arch_name) {
+            result.known = true;
+            result.name = arch_name;
+            result.recurrent_or_hybrid = server_arch_name_is_recurrent_or_hybrid(result.name);
+        }
+    }
+
+    gguf_free(ctx_gguf);
+    if (ctx_meta) {
+        ggml_free(ctx_meta);
+    }
+    return result;
 }
 
 static bool server_model_is_dflash_drafter(const llama_model * model) {
@@ -2016,9 +2086,23 @@ private:
     }
 
     bool speculative_needs_recurrent_backup_sequences() const {
-        const bool needs_backup_sequences =
-            (params_base.speculative.type() != COMMON_SPECULATIVE_TYPE_NONE || params_base.speculative.has_dft());
-        return needs_backup_sequences;
+        if (params_base.speculative.type() != COMMON_SPECULATIVE_TYPE_DFLASH) {
+            return false;
+        }
+
+        const server_model_arch_probe arch = server_probe_model_arch(params_base.model.path);
+        if (!arch.known) {
+            SRV_WRN("%s", "could not determine target architecture before DFlash context allocation; reserving recurrent backup streams conservatively\n");
+            return true;
+        }
+
+        const bool needs_backup = arch.recurrent_or_hybrid;
+        if (!needs_backup) {
+            SRV_INF("DFlash target architecture %s does not need recurrent backup streams; keeping n_parallel=%d\n",
+                    arch.name.c_str(), params_base.n_parallel);
+        }
+
+        return needs_backup;
     }
 
     void swap_mtp_to_mmproj_gpu() {
@@ -2380,6 +2464,10 @@ private:
         vocab = llama_model_get_vocab(model_tgt);
 
         needs_reeval = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+        if (params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH && needs_reeval && !recurrent_backup_sequences) {
+            SRV_ERR("%s", "DFlash target requires recurrent rollback, but recurrent backup streams were not reserved before context allocation\n");
+            return false;
+        }
 
         n_ctx = llama_n_ctx(ctx_tgt);
 
