@@ -221,7 +221,6 @@ extern "C" {
         int32_t sinkhorn_iters;
         int32_t sink_tokens;
 
-        float pool_mem_frac;
         bool  fail_if_unsupported;
     };
 

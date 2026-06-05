@@ -47,7 +47,6 @@ llama_kvarn_params llama_kvarn_default_params() {
         /*.group               =*/ 128,
         /*.sinkhorn_iters      =*/ 16,
         /*.sink_tokens         =*/ 128,
-        /*.pool_mem_frac       =*/ 0.08f,
         /*.fail_if_unsupported =*/ true,
     };
 }
@@ -119,9 +118,6 @@ const char * llama_kvarn_validate_runtime(
     }
     if (params.sink_tokens != 128) {
         return "KVarN currently requires exactly 128 unquantized sink tokens";
-    }
-    if (!std::isfinite(params.pool_mem_frac) || params.pool_mem_frac <= 0.0f || params.pool_mem_frac > 1.0f) {
-        return "KVarN pool memory fraction must be in the interval (0, 1]";
     }
     if (!requirements.attention_supported) {
         return "KVarN is not supported by this attention/cache path";

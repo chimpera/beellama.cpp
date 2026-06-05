@@ -1051,7 +1051,6 @@ static void common_params_kvarn_normalize(common_params & params) {
     llama_kvarn_params selected = llama_kvarn_params_for_type(type);
     selected.sinkhorn_iters      = params.kvarn.sinkhorn_iters;
     selected.sink_tokens         = params.kvarn.sink_tokens;
-    selected.pool_mem_frac       = params.kvarn.pool_mem_frac;
     selected.fail_if_unsupported = params.kvarn.fail_if_unsupported;
     params.kvarn                 = selected;
 
@@ -1060,9 +1059,8 @@ static void common_params_kvarn_normalize(common_params & params) {
     params.cache_type_k       = GGML_TYPE_F16;
     params.cache_type_v       = GGML_TYPE_F16;
 
-    if (params.kv_unified) {
-        LOG_WRN("%s", "warning: KVarN requires non-unified KV streams; forcing --no-kv-unified\n");
-        params.kv_unified = false;
+    if (params.grp_attn_n != 1) {
+        throw std::invalid_argument("KVarN does not support Self-Extend/group attention; use --grp-attn-n 1");
     }
 }
 
@@ -2339,17 +2337,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.kvarn.sinkhorn_iters = value;
         }
     ).set_env("LLAMA_ARG_KV_KVARN_SINKHORN_ITERS"));
-    add_opt(common_arg(
-        {"--kv-kvarn-pool-mem-frac"}, "F",
-        string_format("fraction of device memory available to the KVarN fp16 pool (default: %.2f)", params.kvarn.pool_mem_frac),
-        [](common_params & params, const std::string & value) {
-            const float frac = std::stof(value);
-            if (frac <= 0.0f || frac > 1.0f) {
-                throw std::invalid_argument("KVarN pool memory fraction must be in (0, 1]");
-            }
-            params.kvarn.pool_mem_frac = frac;
-        }
-    ).set_env("LLAMA_ARG_KV_KVARN_POOL_MEM_FRAC"));
     add_opt(common_arg(
         {"--kv-kvarn-fallback"},
         "fall back to the normal KV cache when KVarN is unsupported",

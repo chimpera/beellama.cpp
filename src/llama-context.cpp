@@ -8355,11 +8355,6 @@ llama_context * llama_init_from_model(
             LLAMA_LOG_WARN("%s: KVarN is target-context-only; disabling it for this auxiliary context\n", __func__);
             params.kvarn = llama_kvarn_default_params();
         } else {
-            if (params.kv_unified) {
-                LLAMA_LOG_WARN("%s: KVarN requires non-unified KV streams; forcing kv_unified=false\n", __func__);
-                params.kv_unified = false;
-            }
-
             bool head_dims_supported = true;
             for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
                 if (!model->hparams.has_kv(il)) {
@@ -8385,7 +8380,7 @@ llama_context * llama_init_from_model(
                 /*.attention_supported =*/ attention_supported,
                 /*.head_dims_supported =*/ head_dims_supported,
                 /*.n_seq_max           =*/ std::max(1u, params.n_seq_max),
-                /*.kv_unified          =*/ params.kv_unified,
+                /*.kv_unified          =*/ false,
             };
 
             if (const char * reason = llama_kvarn_validate_runtime(params.kvarn, requirements)) {
@@ -8398,12 +8393,20 @@ llama_context * llama_init_from_model(
                         __func__, llama_kvarn_type_name(params.kvarn.type), reason);
                 params.kvarn = llama_kvarn_default_params();
             } else {
+                if (params.kv_unified) {
+                    LLAMA_LOG_WARN("%s: KVarN requires non-unified KV streams; forcing kv_unified=false\n", __func__);
+                    params.kv_unified = false;
+                }
                 if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
                     LLAMA_LOG_WARN("%s: KVarN requires Flash Attention; enabling it\n", __func__);
                     params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
                 }
                 if (params.type_k != GGML_TYPE_F16 || params.type_v != GGML_TYPE_F16) {
                     LLAMA_LOG_WARN("%s: --cache-type-k/v are ignored while KVarN is enabled\n", __func__);
+                }
+                if (params.kvarn.type != LLAMA_KVARN_K4V2_G128) {
+                    LLAMA_LOG_WARN("%s: KVarN preset %s is experimental; only kvarn_k4v2_g128 is reference-aligned\n",
+                            __func__, llama_kvarn_type_name(params.kvarn.type));
                 }
                 LLAMA_LOG_INFO("%s: enabling structured KVarN cache type %s\n",
                         __func__, llama_kvarn_type_name(params.kvarn.type));
@@ -9348,6 +9351,9 @@ void llama_memory_seq_add(
     if (!mem) {
         return;
     }
+    if (!llama_memory_can_shift(mem)) {
+        GGML_ABORT("cannot add/divide sequence positions because the memory implementation does not support shifting");
+    }
 
     mem->seq_add(seq_id, p0, p1, delta);
 }
@@ -9360,6 +9366,9 @@ void llama_memory_seq_div(
                    int d) {
     if (!mem) {
         return;
+    }
+    if (!llama_memory_can_shift(mem)) {
+        GGML_ABORT("cannot add/divide sequence positions because the memory implementation does not support shifting");
     }
 
     mem->seq_div(seq_id, p0, p1, d);

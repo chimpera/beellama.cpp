@@ -35,47 +35,47 @@ struct llama_kvarn_runtime_requirements {
     bool kv_unified;
 };
 
-LLAMA_API size_t llama_kvarn_type_count();
+size_t llama_kvarn_type_count();
 
-LLAMA_API const llama_kvarn_type_desc * llama_kvarn_type_desc_from_name(const char * name);
-LLAMA_API const llama_kvarn_type_desc * llama_kvarn_type_desc_from_type(llama_kvarn_type type);
+const llama_kvarn_type_desc * llama_kvarn_type_desc_from_name(const char * name);
+const llama_kvarn_type_desc * llama_kvarn_type_desc_from_type(llama_kvarn_type type);
 
-LLAMA_API llama_kvarn_tile_layout llama_kvarn_make_layout(int head_dim, int group, int key_bits, int value_bits);
+llama_kvarn_tile_layout llama_kvarn_make_layout(int head_dim, int group, int key_bits, int value_bits);
 
-LLAMA_API int  llama_kvarn_head_slices(int head_dim);
-LLAMA_API bool llama_kvarn_head_dim_supported(int head_dim);
+int  llama_kvarn_head_slices(int head_dim);
+bool llama_kvarn_head_dim_supported(int head_dim);
 
-LLAMA_API size_t  llama_kvarn_packed_bytes(int n_values, int bits);
-LLAMA_API void    llama_kvarn_pack_bits(const uint8_t * values, int n_values, int bits, uint8_t * dst);
-LLAMA_API uint8_t llama_kvarn_unpack_bits_value(const uint8_t * src, int index, int bits);
+size_t  llama_kvarn_packed_bytes(int n_values, int bits);
+void    llama_kvarn_pack_bits(const uint8_t * values, int n_values, int bits, uint8_t * dst);
+uint8_t llama_kvarn_unpack_bits_value(const uint8_t * src, int index, int bits);
 
-LLAMA_API const char * llama_kvarn_validate_runtime(
+const char * llama_kvarn_validate_runtime(
         const llama_kvarn_params & params,
         const llama_kvarn_runtime_requirements & requirements);
 
-LLAMA_API void llama_kvarn_hadamard_128(float * values);
+void llama_kvarn_hadamard_128(float * values);
 
-LLAMA_API void llama_kvarn_quantize_k_tile(
+void llama_kvarn_quantize_k_tile(
         const float * tile,
         int sinkhorn_iters,
         int bits,
         const llama_kvarn_tile_layout & layout,
         uint8_t * record);
 
-LLAMA_API void llama_kvarn_quantize_v_tile(
+void llama_kvarn_quantize_v_tile(
         const float * tile,
         int sinkhorn_iters,
         int bits,
         const llama_kvarn_tile_layout & layout,
         uint8_t * record);
 
-LLAMA_API void llama_kvarn_dequantize_k_tile(
+void llama_kvarn_dequantize_k_tile(
         const uint8_t * record,
         int bits,
         const llama_kvarn_tile_layout & layout,
         float * tile);
 
-LLAMA_API void llama_kvarn_dequantize_v_tile(
+void llama_kvarn_dequantize_v_tile(
         const uint8_t * record,
         int bits,
         const llama_kvarn_tile_layout & layout,

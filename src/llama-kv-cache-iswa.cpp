@@ -60,14 +60,12 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
 
         size_swa = size_base;
     }
-    if (use_kvarn && size_swa != size_base) {
-        LLAMA_LOG_WARN("%s: KVarN requires full-size SWA cache for now; using %u cells instead of %u\n",
-                __func__, size_base, size_swa);
-        size_swa = size_base;
+    if (use_kvarn) {
+        LLAMA_LOG_INFO("%s: KVarN enabled for non-SWA layers; SWA layers use compact normal KV cache\n", __func__);
     }
 
-    auto make_cache = [&](uint32_t size, uint32_t n_swa, llama_swa_type swa_type, const layer_filter_cb & layer_filter) -> std::unique_ptr<llama_memory_i> {
-        if (use_kvarn) {
+    auto make_cache = [&](uint32_t size, uint32_t n_swa, llama_swa_type swa_type, const layer_filter_cb & layer_filter, bool enable_kvarn) -> std::unique_ptr<llama_memory_i> {
+        if (enable_kvarn) {
             return std::make_unique<llama_kv_cache_kvarn>(
                     model,
                     hparams,
@@ -91,11 +89,11 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
 
     LLAMA_LOG_INFO("%s: creating non-SWA KV cache, size = %u cells\n", __func__, size_base);
 
-    kv_base = make_cache(size_base, 0, LLAMA_SWA_TYPE_NONE, filter_base);
+    kv_base = make_cache(size_base, 0, LLAMA_SWA_TYPE_NONE, filter_base, use_kvarn);
 
     LLAMA_LOG_INFO("%s: creating     SWA KV cache, size = %u cells\n", __func__, size_swa);
 
-    kv_swa = make_cache(size_swa, hparams.n_swa, hparams.swa_type, filter_swa);
+    kv_swa = make_cache(size_swa, hparams.n_swa, hparams.swa_type, filter_swa, false);
 }
 
 void llama_kv_cache_iswa::clear(bool data) {

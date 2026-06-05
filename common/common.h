@@ -725,7 +725,6 @@ struct common_params {
         /*.group               =*/ 128,
         /*.sinkhorn_iters      =*/ 16,
         /*.sink_tokens         =*/ 128,
-        /*.pool_mem_frac       =*/ 0.08f,
         /*.fail_if_unsupported =*/ true,
     };
 
