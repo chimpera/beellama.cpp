@@ -17,7 +17,7 @@ namespace {
 constexpr uint32_t KVAR_N_GROUP = 128;
 constexpr uint32_t KVAR_N_STAGE_GROUPS = 3;
 constexpr uint32_t KVAR_N_STATE_MAGIC = 0x4e52564b; // "KVRN"
-constexpr uint32_t KVAR_N_STATE_VERSION = 1;
+constexpr uint32_t KVAR_N_STATE_VERSION = 2;
 
 bool kvarn_backend_supports_native_ops(ggml_backend_dev_t dev) {
     if (dev == nullptr || ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
@@ -26,11 +26,7 @@ bool kvarn_backend_supports_native_ops(ggml_backend_dev_t dev) {
 
     auto * reg = ggml_backend_dev_backend_reg(dev);
     const char * name = reg ? ggml_backend_reg_name(reg) : nullptr;
-    return name != nullptr &&
-        (std::strstr(name, "CUDA") != nullptr ||
-         std::strstr(name, "ROCm") != nullptr ||
-         std::strstr(name, "HIP") != nullptr ||
-         std::strstr(name, "MUSA") != nullptr);
+    return name != nullptr && std::strstr(name, "CUDA") != nullptr;
 }
 
 size_t kvarn_record_bytes(int bits) {
@@ -38,14 +34,31 @@ size_t kvarn_record_bytes(int bits) {
         3 * KVAR_N_GROUP * sizeof(ggml_fp16_t);
 }
 
+void write_kvarn_tensor(llama_io_write_i & io, ggml_tensor * tensor) {
+    const uint64_t size = ggml_nbytes(tensor);
+    io.write(&size, sizeof(size));
+    io.write_tensor(tensor, 0, size);
+}
+
+void read_kvarn_tensor(llama_io_read_i & io, ggml_tensor * tensor) {
+    uint64_t size;
+    io.read(&size, sizeof(size));
+    if (size != ggml_nbytes(tensor)) {
+        throw std::runtime_error("mismatched KVarN cache tensor size");
+    }
+    io.read_tensor(tensor, 0, size);
+}
+
 } // namespace
 
 llama_kv_cache_kvarn_context::llama_kv_cache_kvarn_context(
         llama_kv_cache_kvarn * cache,
-        llama_memory_context_ptr base) :
+        llama_memory_context_ptr base,
+        llama_context * update_lctx) :
     llama_kv_cache_context(base ? base->get_status() : LLAMA_MEMORY_STATUS_FAILED_PREPARE),
     cache(cache),
-    base_ctx(std::move(base)) {
+    base_ctx(std::move(base)),
+    update_lctx(update_lctx) {
 }
 
 llama_kv_cache_context * llama_kv_cache_kvarn_context::base() const {
@@ -57,11 +70,19 @@ bool llama_kv_cache_kvarn_context::next() {
 }
 
 bool llama_kv_cache_kvarn_context::apply() {
-    return base()->apply();
+    if (!base()->apply()) {
+        return false;
+    }
+
+    return !update_lctx || cache->apply_pending_stream_copies(update_lctx);
 }
 
 llama_memory_status llama_kv_cache_kvarn_context::get_status() const {
-    return base_ctx ? base_ctx->get_status() : LLAMA_MEMORY_STATUS_FAILED_PREPARE;
+    const auto status = base_ctx ? base_ctx->get_status() : LLAMA_MEMORY_STATUS_FAILED_PREPARE;
+    if (status == LLAMA_MEMORY_STATUS_NO_UPDATE && cache->has_pending_stream_copies()) {
+        return LLAMA_MEMORY_STATUS_SUCCESS;
+    }
+    return status;
 }
 
 const llama_ubatch & llama_kv_cache_kvarn_context::get_ubatch() const {
@@ -282,7 +303,7 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         if (offload && !kvarn_backend_supports_native_ops(dev)) {
             throw std::runtime_error(format(
                 "KVarN cache layer %u is assigned to backend %s, which has no native KVarN operations; "
-                "use CUDA/ROCm or disable KV offload for the CPU fallback",
+                "use CUDA or disable KV offload for the CPU fallback",
                 il, dev ? ggml_backend_dev_name(dev) : "unknown"));
         }
 
@@ -445,7 +466,7 @@ llama_memory_context_ptr llama_kv_cache_kvarn::init_full() {
 }
 
 llama_memory_context_ptr llama_kv_cache_kvarn::init_update(llama_context * lctx, bool optimize) {
-    return metadata->init_update(lctx, optimize);
+    return std::make_unique<llama_kv_cache_kvarn_context>(this, metadata->init_update(lctx, optimize), lctx);
 }
 
 uint32_t llama_kv_cache_kvarn::get_kv_n_stream() const {
@@ -544,14 +565,8 @@ void llama_kv_cache_kvarn::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_d
 
         GGML_ASSERT(is_full && "KVarN cross-stream seq_cp() is only supported for full KV buffers");
 
-        LLAMA_LOG_DEBUG("%s: copying KVarN stream %u to stream %u\n", __func__, stream_src, stream_dst);
-
-        for (auto & layer : layers) {
-            ggml_backend_tensor_copy(layer.k_records_stream[stream_src], layer.k_records_stream[stream_dst]);
-            ggml_backend_tensor_copy(layer.v_records_stream[stream_src], layer.v_records_stream[stream_dst]);
-            ggml_backend_tensor_copy(layer.k_stage_stream[stream_src], layer.k_stage_stream[stream_dst]);
-            ggml_backend_tensor_copy(layer.v_stage_stream[stream_src], layer.v_stage_stream[stream_dst]);
-        }
+        pending_stream_copies.ssrc.push_back(stream_src);
+        pending_stream_copies.sdst.push_back(stream_dst);
     }
 
     metadata->seq_cp(seq_id_src, seq_id_dst, p0, p1);
@@ -562,11 +577,11 @@ void llama_kv_cache_kvarn::seq_keep(llama_seq_id seq_id) {
 }
 
 void llama_kv_cache_kvarn::seq_add(llama_seq_id, llama_pos, llama_pos, llama_pos) {
-    LLAMA_LOG_ERROR("%s: KVarN does not support position shifts\n", __func__);
+    GGML_ABORT("KVarN does not support position shifts");
 }
 
 void llama_kv_cache_kvarn::seq_div(llama_seq_id, llama_pos, llama_pos, int) {
-    LLAMA_LOG_ERROR("%s: KVarN does not support position division\n", __func__);
+    GGML_ABORT("KVarN does not support position division");
 }
 
 llama_pos llama_kv_cache_kvarn::seq_pos_min(llama_seq_id seq_id) const {
@@ -588,22 +603,82 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_kvarn::memory_breakd
     return result;
 }
 
+bool llama_kv_cache_kvarn::has_pending_stream_copies() const {
+    return !pending_stream_copies.empty();
+}
+
+void llama_kv_cache_kvarn::copy_kvarn_stream(uint32_t stream_src, uint32_t stream_dst) {
+    GGML_ASSERT(stream_src < n_stream);
+    GGML_ASSERT(stream_dst < n_stream);
+    GGML_ASSERT(stream_src != stream_dst);
+
+    LLAMA_LOG_DEBUG("%s: copying KVarN stream %u to stream %u\n", __func__, stream_src, stream_dst);
+
+    for (auto & layer : layers) {
+        ggml_backend_tensor_copy(layer.k_records_stream[stream_src], layer.k_records_stream[stream_dst]);
+        ggml_backend_tensor_copy(layer.v_records_stream[stream_src], layer.v_records_stream[stream_dst]);
+        ggml_backend_tensor_copy(layer.k_stage_stream[stream_src], layer.k_stage_stream[stream_dst]);
+        ggml_backend_tensor_copy(layer.v_stage_stream[stream_src], layer.v_stage_stream[stream_dst]);
+    }
+}
+
+bool llama_kv_cache_kvarn::apply_pending_stream_copies(llama_context * lctx) {
+    if (pending_stream_copies.empty()) {
+        return true;
+    }
+
+    GGML_ASSERT(pending_stream_copies.ssrc.size() == pending_stream_copies.sdst.size());
+    llama_synchronize(lctx);
+
+    const size_t n_copy = pending_stream_copies.ssrc.size();
+    for (size_t i = 0; i < n_copy; ++i) {
+        copy_kvarn_stream(pending_stream_copies.ssrc[i], pending_stream_copies.sdst[i]);
+    }
+
+    pending_stream_copies.ssrc.clear();
+    pending_stream_copies.sdst.clear();
+    return true;
+}
+
 void llama_kv_cache_kvarn::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
     metadata->state_write(io, seq_id, flags);
+
+    std::vector<uint32_t> saved_streams;
+    if (seq_id == -1) {
+        saved_streams.reserve(n_stream);
+        for (uint32_t stream = 0; stream < n_stream; ++stream) {
+            saved_streams.push_back(stream);
+        }
+    } else {
+        const uint32_t stream = metadata->get_stream_for_seq(seq_id);
+        GGML_ASSERT(stream < n_stream);
+        saved_streams.push_back(stream);
+    }
 
     io.write(&KVAR_N_STATE_MAGIC, sizeof(KVAR_N_STATE_MAGIC));
     io.write(&KVAR_N_STATE_VERSION, sizeof(KVAR_N_STATE_VERSION));
     const int32_t type = params.type;
     const uint32_t n_layers = layers.size();
+    const uint32_t n_saved_streams = saved_streams.size();
     io.write(&type, sizeof(type));
     io.write(&n_layers, sizeof(n_layers));
+    io.write(&n_saved_streams, sizeof(n_saved_streams));
+    for (const uint32_t stream : saved_streams) {
+        io.write(&stream, sizeof(stream));
+    }
 
     for (const auto & layer : layers) {
         io.write(&layer.il, sizeof(layer.il));
-        for (auto * tensor : { layer.k_records, layer.v_records, layer.k_stage, layer.v_stage }) {
-            const uint64_t size = ggml_nbytes(tensor);
-            io.write(&size, sizeof(size));
-            io.write_tensor(tensor, 0, size);
+        for (const uint32_t stream : saved_streams) {
+            io.write(&stream, sizeof(stream));
+            for (auto * tensor : {
+                    layer.k_records_stream[stream],
+                    layer.v_records_stream[stream],
+                    layer.k_stage_stream[stream],
+                    layer.v_stage_stream[stream],
+                }) {
+                write_kvarn_tensor(io, tensor);
+            }
         }
     }
 }
@@ -619,9 +694,43 @@ void llama_kv_cache_kvarn::state_read(llama_io_read_i & io, llama_seq_id seq_id,
     io.read(&version, sizeof(version));
     io.read(&type, sizeof(type));
     io.read(&n_layers, sizeof(n_layers));
-    if (magic != KVAR_N_STATE_MAGIC || version != KVAR_N_STATE_VERSION ||
+    if (magic != KVAR_N_STATE_MAGIC || (version != 1 && version != KVAR_N_STATE_VERSION) ||
         type != params.type || n_layers != layers.size()) {
         throw std::runtime_error("incompatible KVarN cache state");
+    }
+
+    if (version == 1) {
+        for (const auto & layer : layers) {
+            uint32_t il;
+            io.read(&il, sizeof(il));
+            if (il != layer.il) {
+                throw std::runtime_error("mismatched KVarN cache layer");
+            }
+
+            for (auto * tensor : { layer.k_records, layer.v_records, layer.k_stage, layer.v_stage }) {
+                read_kvarn_tensor(io, tensor);
+            }
+        }
+        return;
+    }
+
+    uint32_t n_saved_streams;
+    io.read(&n_saved_streams, sizeof(n_saved_streams));
+    if (n_saved_streams == 0 || n_saved_streams > n_stream) {
+        throw std::runtime_error("invalid KVarN cache stream count");
+    }
+
+    std::vector<uint32_t> saved_streams(n_saved_streams);
+    for (uint32_t & stream : saved_streams) {
+        io.read(&stream, sizeof(stream));
+        if (stream >= n_stream) {
+            throw std::runtime_error("invalid KVarN cache stream");
+        }
+    }
+
+    const uint32_t seq_stream = seq_id == -1 ? 0 : metadata->get_stream_for_seq(seq_id);
+    if (seq_id != -1 && seq_stream >= n_stream) {
+        throw std::runtime_error("invalid KVarN sequence stream");
     }
 
     for (const auto & layer : layers) {
@@ -631,13 +740,22 @@ void llama_kv_cache_kvarn::state_read(llama_io_read_i & io, llama_seq_id seq_id,
             throw std::runtime_error("mismatched KVarN cache layer");
         }
 
-        for (auto * tensor : { layer.k_records, layer.v_records, layer.k_stage, layer.v_stage }) {
-            uint64_t size;
-            io.read(&size, sizeof(size));
-            if (size != ggml_nbytes(tensor)) {
-                throw std::runtime_error("mismatched KVarN cache tensor size");
+        for (uint32_t i = 0; i < n_saved_streams; ++i) {
+            uint32_t stream;
+            io.read(&stream, sizeof(stream));
+            if (stream != saved_streams[i]) {
+                throw std::runtime_error("mismatched KVarN cache stream");
             }
-            io.read_tensor(tensor, 0, size);
+
+            const uint32_t stream_dst = seq_id == -1 ? stream : seq_stream;
+            for (auto * tensor : {
+                    layer.k_records_stream[stream_dst],
+                    layer.v_records_stream[stream_dst],
+                    layer.k_stage_stream[stream_dst],
+                    layer.v_stage_stream[stream_dst],
+                }) {
+                read_kvarn_tensor(io, tensor);
+            }
         }
     }
 }

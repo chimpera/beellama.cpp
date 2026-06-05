@@ -16,7 +16,8 @@ class llama_kv_cache_kvarn_context : public llama_kv_cache_context {
 public:
     llama_kv_cache_kvarn_context(
             llama_kv_cache_kvarn * cache,
-            llama_memory_context_ptr base);
+            llama_memory_context_ptr base,
+            llama_context * update_lctx = nullptr);
 
     bool next() override;
     bool apply() override;
@@ -64,6 +65,7 @@ private:
 
     llama_kv_cache_kvarn * cache;
     llama_memory_context_ptr base_ctx;
+    llama_context * update_lctx;
 
     mutable std::unordered_map<int32_t, ggml_tensor *> stored_k;
     mutable std::unordered_map<int32_t, ggml_tensor *> stored_v;
@@ -117,6 +119,8 @@ public:
 
     llama_kv_cache * get_metadata_cache() const;
     int32_t mapped_layer_id(int32_t il) const;
+    bool has_pending_stream_copies() const;
+    bool apply_pending_stream_copies(llama_context * lctx);
 
     ggml_tensor * store(
             ggml_context * ctx,
@@ -152,6 +156,7 @@ private:
 
     const layer & layer_for(int32_t il) const;
     bool can_remove(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
+    void copy_kvarn_stream(uint32_t stream_src, uint32_t stream_dst);
 
     const llama_model & model;
     const llama_hparams & hparams;
@@ -163,4 +168,5 @@ private:
     std::vector<layer> layers;
     std::unordered_map<int32_t, int32_t> map_layer_ids;
     std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> ctxs_bufs;
+    llama_kv_cache::stream_copy_info pending_stream_copies;
 };
