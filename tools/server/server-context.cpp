@@ -906,7 +906,7 @@ struct server_slot : server_adaptive_dm_state {
             common_context_seq_rm(ctx_dft, id, -1, -1);
         }
 
-        prompt.tokens.clear();
+        prompt.clear();
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -2222,6 +2222,28 @@ private:
 
         SRV_ERR("failed to expand recurrent state to %d cells after prompt cache (%s)\n", n_seq_max_full, reason);
         GGML_ABORT("failed to expand recurrent state after prompt cache restore; continuing would make scheduler reservation inconsistent\n");
+    }
+
+    size_t prompt_cache_limit_bytes() const {
+        return params_base.cache_ram_mib > 0
+            ? (size_t) params_base.cache_ram_mib * 1024ull * 1024ull
+            : 0;
+    }
+
+    size_t context_checkpoint_budget_bytes() const {
+        const size_t cache_limit = prompt_cache_limit_bytes();
+        return cache_limit > 0 ? cache_limit / 2 : 0;
+    }
+
+    void erase_oldest_checkpoint(server_slot & slot, const char * reason) {
+        const auto & cur = slot.prompt.checkpoints.front();
+
+        SLT_WRN(slot,
+                "erasing old context checkpoint (%s, pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+                reason && reason[0] ? reason : "limit", cur.pos_min, cur.pos_max, cur.n_tokens,
+                (float) cur.size() / 1024 / 1024);
+
+        slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
     }
 
     bool dflash_shared_drafter_batch_allowed(int n_drafting) {
@@ -4016,39 +4038,76 @@ private:
 
     // n_tokens_cur: the number of tokens added to the batch for the current slot
     void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
-        while (slot.prompt.checkpoints.size() >= (size_t) params_base.n_ctx_checkpoints) {
-            // make room for the new checkpoint, if needed
-            const auto & cur = slot.prompt.checkpoints.front();
-
-            SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
-                    cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
-
-            slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
-        }
-
-        auto & cur = slot.prompt.checkpoints.emplace_back();
-
-        cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max);
-
-        cur.update_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-        cur.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-
         // Save DFlash ring buffer alongside the recurrent state checkpoint.
         const bool dflash_checkpoint_slot =
             slot.can_speculate() &&
             params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH;
-        size_t ring_size = 0;
+        const size_t cur_size_tgt = ctx_tgt
+            ? llama_state_seq_get_size_ext(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)
+            : 0;
+        const size_t cur_size_dft = ctx_dft
+            ? llama_state_seq_get_size_ext(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)
+            : 0;
+        size_t ring_size = dflash_checkpoint_slot
+            ? common_speculative_ring_state_size(slot.get_spec())
+            : 0;
+        const size_t new_size = cur_size_tgt + cur_size_dft + ring_size;
+        const size_t checkpoint_budget = context_checkpoint_budget_bytes();
+
+        if (checkpoint_budget > 0 && new_size > checkpoint_budget) {
+            SLT_WRN(slot,
+                    "skipping context checkpoint: state size %.3f MiB exceeds checkpoint budget %.3f MiB\n",
+                    new_size / (1024.0 * 1024.0), checkpoint_budget / (1024.0 * 1024.0));
+            return;
+        }
+
+        while (slot.prompt.checkpoints.size() >= (size_t) params_base.n_ctx_checkpoints) {
+            erase_oldest_checkpoint(slot, "count limit");
+        }
+
+        while (checkpoint_budget > 0 &&
+                !slot.prompt.checkpoints.empty() &&
+                server_prompt_checkpoints_size(slot.prompt.checkpoints) + new_size > checkpoint_budget) {
+            erase_oldest_checkpoint(slot, "RAM budget");
+        }
+
+        common_prompt_checkpoint cur;
+        cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max);
+
+        try {
+            cur.data_tgt.resize(cur_size_tgt);
+            cur.data_dft.resize(cur_size_dft);
+            cur.ring_data.resize(ring_size);
+        } catch (const std::bad_alloc & e) {
+            SLT_WRN(slot,
+                    "skipping context checkpoint: failed to allocate %.3f MiB state (%s)\n",
+                    new_size / (1024.0 * 1024.0), e.what());
+            return;
+        }
+
+        if (cur_size_tgt > 0) {
+            const size_t n = llama_state_seq_get_data_ext(
+                    ctx_tgt, cur.data_tgt.data(), cur_size_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            if (n != cur_size_tgt) {
+                GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", cur_size_tgt, n);
+            }
+        }
+
+        if (ctx_dft && cur_size_dft > 0) {
+            const size_t n = llama_state_seq_get_data_ext(
+                    ctx_dft.get(), cur.data_dft.data(), cur_size_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            if (n != cur_size_dft) {
+                GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", cur_size_dft, n);
+            }
+        }
+
         bool ring_saved = false;
-        if (dflash_checkpoint_slot) {
-            ring_size = common_speculative_ring_state_size(slot.get_spec());
-            if (ring_size > 0) {
-                cur.ring_data.resize(ring_size);
-                ring_saved = common_speculative_ring_state_save(
-                        slot.get_spec(), cur.ring_data.data(), ring_size);
-                if (!ring_saved) {
-                    cur.ring_data.clear();
-                    ring_size = 0;
-                }
+        if (dflash_checkpoint_slot && ring_size > 0) {
+            ring_saved = common_speculative_ring_state_save(
+                    slot.get_spec(), cur.ring_data.data(), ring_size);
+            if (!ring_saved) {
+                cur.ring_data.clear();
+                ring_size = 0;
             }
         }
         if (dflash_checkpoint_slot &&
@@ -4059,10 +4118,13 @@ private:
                     cur.pos_min, cur.pos_max, cur.n_tokens, ring_size, ring_saved ? 1 : 0);
         }
 
+        slot.prompt.checkpoints.push_back(std::move(cur));
+        const auto & saved = slot.prompt.checkpoints.back();
+
         SLT_INF(slot,
                 "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
-                (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, cur.pos_min,
-                cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+                (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, saved.pos_min,
+                saved.pos_max, saved.n_tokens, (float) saved.size() / 1024 / 1024);
     }
 
     void process_single_task(server_task && task) {
@@ -6362,7 +6424,8 @@ private:
             // DFlash: flush captured hidden states into the ring buffer before
             // the next llama_decode resets the capture buffer.
             for (auto & pf : pending_prefill_flushes) {
-                const int written = common_speculative_flush_prefill(pf.spec, pf.span.src_offset, pf.span.n_tokens);
+                const int written = common_speculative_flush_prefill(
+                        pf.spec, pf.span.src_offset, pf.span.n_tokens, pf.span.capture_end);
                 if (written != pf.span.n_tokens) {
                     SRV_ERR("dflash prefill flush mismatch: slot=%d requested=%d written=%d src_offset=%d; disabling DFlash drafting until fresh hiddens are available\n",
                             pf.slot_id, pf.span.n_tokens, written, pf.span.src_offset);

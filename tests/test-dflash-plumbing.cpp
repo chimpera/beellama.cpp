@@ -1599,8 +1599,15 @@ int main(int argc, char ** argv) {
     // Server should pass the planned source offset. GPU staging normalizes to
     // window-relative offset 0 inside flush_prefill(), while CPU fallback needs
     // the original sub-batch offset.
-    ok &= expect(server_context.find("common_speculative_flush_prefill(pf.spec, pf.span.src_offset,") != std::string::npos,
-        "server must pass planned source offset to prefill flush");
+    const size_t flush_call = server_context.find("common_speculative_flush_prefill(");
+    ok &= expect(flush_call != std::string::npos &&
+                 server_context.find("pf.span.src_offset", flush_call) != std::string::npos &&
+                 server_context.find("pf.span.n_tokens", flush_call) != std::string::npos &&
+                 server_context.find("pf.span.capture_end", flush_call) != std::string::npos,
+        "server must pass planned source offset and absolute capture end to prefill flush");
+    ok &= expect(speculative_h.find("common_dflash_prefill_committed_after_flush") != std::string::npos &&
+                 speculative.find("common_dflash_prefill_committed_after_flush(") != std::string::npos,
+        "DFlash prefill flush must preserve absolute committed positions for long prompts");
 
     // Decode loop must compute intersection offsets
     ok &= expect(context_cpp.find("inter_begin") != std::string::npos,

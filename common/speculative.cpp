@@ -241,6 +241,21 @@ common_dflash_ring_write common_dflash_ring_write_plan(int ring_size, int ring_p
     return { normalized_pos, ring_size, skip };
 }
 
+int common_dflash_prefill_committed_after_flush(
+        int current_committed,
+        int n_written,
+        int commit_end_pos) {
+    if (n_written <= 0) {
+        return current_committed;
+    }
+
+    if (commit_end_pos > 0) {
+        return commit_end_pos;
+    }
+
+    return current_committed + n_written;
+}
+
 static bool common_speculative_are_compatible(
     const llama_model * model_tgt,
     const llama_model * model_dft) {
@@ -369,7 +384,7 @@ struct common_speculative_impl {
 
     virtual void update_logits_by_indices(llama_context * /*ctx*/, const std::vector<int> & /*capture_indices*/) {}
 
-    virtual int flush_prefill(int /*src_offset*/ = 0, int /*n_tokens*/ = 0) { return 0; }
+    virtual int flush_prefill(int /*src_offset*/ = 0, int /*n_tokens*/ = 0, int /*commit_end_pos*/ = 0) { return 0; }
 
     virtual int prepare_batch_draft(llama_context * /*ctx_dft_ext*/) { return -1; }
 
@@ -2663,7 +2678,7 @@ struct common_speculative_impl_dflash : public common_speculative_impl {
         return true;
     }
 
-    int flush_prefill(int src_offset = 0, int n_tokens = 0) override {
+    int flush_prefill(int src_offset = 0, int n_tokens = 0, int commit_end_pos = 0) override {
         llama_dflash_set_active_slot(ctx_tgt, seq_id);
 
         prefill_flush_called = true;
@@ -2785,10 +2800,10 @@ struct common_speculative_impl_dflash : public common_speculative_impl {
                     ? (writes_cpu_ring ? "cpu_ring+gpu_ring" : "gpu_ring")
                     : (writes_cpu_ring ? "cpu_ring" : "none");
 
-            LOG_INF("dflash prefill flush: capture_source=%s ring_dst=%s captured=%lld offset=%d n_tokens=%d to_write=%d n_src_layers=%d prefill_flushed=%d ring_write_pos=%d ring_filled=%d committed_len=%d\n",
+            LOG_INF("dflash prefill flush: capture_source=%s ring_dst=%s captured=%lld offset=%d n_tokens=%d to_write=%d n_src_layers=%d prefill_flushed=%d ring_write_pos=%d ring_filled=%d committed_len=%d commit_end_pos=%d\n",
                     capture_source, ring_dst, (long long) captured, offset, n_tokens,
                     to_write, n_src_layers, (int) prefill_flushed, ring_write_pos,
-                    ring_filled, committed_len);
+                    ring_filled, committed_len, commit_end_pos);
         }
 
         if (!prefill_flushed) {
@@ -2808,7 +2823,8 @@ struct common_speculative_impl_dflash : public common_speculative_impl {
             return 0;
         }
 
-        committed_len += actual_written;
+        committed_len = common_dflash_prefill_committed_after_flush(
+                committed_len, actual_written, commit_end_pos);
         update_drafter_kv_cache(actual_written);
         prefill_flushed = true;
         prefill_flush_written += actual_written;
@@ -4849,13 +4865,13 @@ void common_speculative_rollback_dft(common_speculative * spec, llama_seq_id seq
     }
 }
 
-int common_speculative_flush_prefill(common_speculative * spec, int src_offset, int n_tokens) {
+int common_speculative_flush_prefill(common_speculative * spec, int src_offset, int n_tokens, int commit_end_pos) {
     if (spec == nullptr) {
         return 0;
     }
     int total_written = 0;
     for (auto & impl : spec->impls) {
-        total_written += impl->flush_prefill(src_offset, n_tokens);
+        total_written += impl->flush_prefill(src_offset, n_tokens, commit_end_pos);
     }
     return total_written;
 }

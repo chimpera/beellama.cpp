@@ -649,6 +649,13 @@ struct server_prompt {
         return tokens.size();
     }
 
+    void clear() {
+        tokens.clear();
+        std::vector<uint8_t>().swap(data.main);
+        std::vector<uint8_t>().swap(data.drft);
+        checkpoints.clear();
+    }
+
     server_prompt clone() const {
         return server_prompt {
             tokens.clone(),
@@ -657,6 +664,13 @@ struct server_prompt {
         };
     }
 };
+
+size_t server_prompt_checkpoints_size(const std::list<common_prompt_checkpoint> & checkpoints);
+
+server_prompt server_prompt_clone_with_checkpoint_budget(
+        const server_prompt & prompt,
+        size_t state_size,
+        size_t limit_size);
 
 struct server_prompt_cache {
     server_prompt_cache(int32_t limit_size_mib, size_t limit_tokens) {

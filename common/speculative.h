@@ -114,6 +114,11 @@ void common_speculative_print_stats(const common_speculative * spec);
 
 common_dflash_ring_write common_dflash_ring_write_plan(int ring_size, int ring_pos, int n_tokens);
 
+int common_dflash_prefill_committed_after_flush(
+        int current_committed,
+        int n_written,
+        int commit_end_pos);
+
 bool common_dflash_prefill_capture_complete_for_test(int captured, int requested);
 
 bool common_dflash_cpu_ring_valid_after_write_for_test(
@@ -189,7 +194,7 @@ void common_speculative_draft_batch(
 void   common_speculative_update_logits(common_speculative * spec, llama_context * ctx, const llama_tokens & batch_tokens, int n_accepted);
 void   common_speculative_update_logits_deferred_dflash_kv(common_speculative * spec, llama_context * ctx, const llama_tokens & batch_tokens, int n_accepted);
 void   common_speculative_update_logits_by_indices(common_speculative * spec, llama_context * ctx, const std::vector<int> & capture_indices);
-int    common_speculative_flush_prefill(common_speculative * spec, int src_offset = 0, int n_tokens = 0);
+int    common_speculative_flush_prefill(common_speculative * spec, int src_offset = 0, int n_tokens = 0, int commit_end_pos = 0);
 void   common_speculative_set_prefill_capture_enabled(common_speculative * spec, bool enabled);
 void   common_speculative_discard_dflash_state(common_speculative * spec, const char * reason);
 void   common_speculative_note_prefill_suffix_scheduled(common_speculative * spec);

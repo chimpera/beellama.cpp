@@ -2490,6 +2490,46 @@ json server_task_result_apply_lora::to_json() {
 //
 // server_prompt_cache
 //
+size_t server_prompt_checkpoints_size(const std::list<common_prompt_checkpoint> & checkpoints) {
+    size_t res = 0;
+
+    for (const auto & ckpt : checkpoints) {
+        res += ckpt.size();
+    }
+
+    return res;
+}
+
+server_prompt server_prompt_clone_with_checkpoint_budget(
+        const server_prompt & prompt,
+        size_t state_size,
+        size_t limit_size) {
+    server_prompt res;
+    res.tokens = prompt.tokens.clone();
+
+    if (limit_size == 0) {
+        res.checkpoints = prompt.checkpoints;
+        return res;
+    }
+
+    if (state_size >= limit_size) {
+        return res;
+    }
+
+    size_t remaining = limit_size - state_size;
+    for (auto it = prompt.checkpoints.rbegin(); it != prompt.checkpoints.rend(); ++it) {
+        const size_t ckpt_size = it->size();
+        if (ckpt_size > remaining) {
+            continue;
+        }
+
+        res.checkpoints.push_front(*it);
+        remaining -= ckpt_size;
+    }
+
+    return res;
+}
+
 size_t server_prompt_cache::size() const {
     size_t res = 0;
 
@@ -2511,6 +2551,13 @@ size_t server_prompt_cache::n_tokens() const {
 }
 
 server_prompt * server_prompt_cache::alloc(const server_prompt & prompt, size_t state_size_tgt, size_t state_size_dft) {
+    const size_t state_size = state_size_tgt + state_size_dft;
+    if (limit_size > 0 && state_size > limit_size) {
+        SRV_WRN(" - prompt state size %.3f MiB exceeds cache limit %.3f MiB, skipping save\n",
+                state_size / (1024.0 * 1024.0), limit_size / (1024.0 * 1024.0));
+        return nullptr;
+    }
+
     // first check if the current state is contained fully in the cache
     for (auto it = states.begin(); it != states.end(); ++it) {
         const int cur_lcp_len = it->tokens.get_common_prefix(prompt.tokens);
@@ -2553,13 +2600,19 @@ server_prompt * server_prompt_cache::alloc(const server_prompt & prompt, size_t 
         return nullptr;
     }
 
+    server_prompt cache_prompt = server_prompt_clone_with_checkpoint_budget(prompt, state_size, limit_size);
+    if (cache_prompt.checkpoints.size() != prompt.checkpoints.size()) {
+        SRV_WRN(" - pruned prompt cache checkpoints from %zu to %zu to fit RAM limit\n",
+                prompt.checkpoints.size(), cache_prompt.checkpoints.size());
+    }
+
     states.push_back({
-        /*.tokens      =*/ prompt.tokens.clone(),
+        /*.tokens      =*/ std::move(cache_prompt.tokens),
         /*.data        =*/ {
             /*.main =*/ std::move(state_data_tgt),
             /*.drft =*/ std::move(state_data_dft),
         },
-        /*.checkpoints =*/ prompt.checkpoints,
+        /*.checkpoints =*/ std::move(cache_prompt.checkpoints),
     });
 
     return &states.back();
@@ -2642,8 +2695,7 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
 
 void server_prompt_cache::update() {
     if (limit_size > 0) {
-        // always keep at least one state, regardless of the limits
-        while (states.size() > 1 && size() > limit_size) {
+        while (!states.empty() && size() > limit_size) {
             if (states.empty()) {
                 break;
             }

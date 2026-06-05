@@ -46,5 +46,11 @@ int main() {
         assert(plan.src_token_offset == 0);
     }
 
+    {
+        assert(common_dflash_prefill_committed_after_flush(0, 508, 54366) == 54366);
+        assert(common_dflash_prefill_committed_after_flush(508, 512, 54878) == 54878);
+        assert(common_dflash_prefill_committed_after_flush(1020, 4, 0) == 1024);
+    }
+
     return 0;
 }
