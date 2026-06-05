@@ -141,9 +141,16 @@ void llama_memory_hybrid_iswa::clear(bool data) {
     mem_recr->clear(data);
 }
 
+bool llama_memory_hybrid_iswa::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    return mem_recr->can_seq_rm(seq_id, p0, p1) &&
+           mem_attn->can_seq_rm(seq_id, p0, p1);
+}
+
 bool llama_memory_hybrid_iswa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    // Try removing from the recurrent cache first since it may fail. If it does
-    // fail, the cache will not have been mutated.
+    if (!can_seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
+
     if (!mem_recr->seq_rm(seq_id, p0, p1)) {
         return false;
     }

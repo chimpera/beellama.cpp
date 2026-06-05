@@ -510,8 +510,12 @@ bool llama_kv_cache_kvarn::can_remove(llama_seq_id seq_id, llama_pos p0, llama_p
     return llama_kvarn_can_remove_range(pos_max, p0, p1, KVAR_N_GROUP);
 }
 
+bool llama_kv_cache_kvarn::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    return can_remove(seq_id, p0, p1);
+}
+
 bool llama_kv_cache_kvarn::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    if (!can_remove(seq_id, p0, p1)) {
+    if (!can_seq_rm(seq_id, p0, p1)) {
         LLAMA_LOG_WARN("%s: KVarN can only remove a complete sequence or the current/previous fp16 tail groups\n", __func__);
         return false;
     }

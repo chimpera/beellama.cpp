@@ -150,10 +150,21 @@ void llama_memory_hybrid::clear(bool data) {
     mem_recr->clear(data);
 }
 
+bool llama_memory_hybrid::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    return mem_recr->can_seq_rm(seq_id, p0, p1) &&
+           mem_attn->can_seq_rm(seq_id, p0, p1);
+}
+
 bool llama_memory_hybrid::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    bool ok_recr = mem_recr->seq_rm(seq_id, p0, p1);
-    bool ok_attn = mem_attn->seq_rm(seq_id, p0, p1);
-    return ok_recr && ok_attn;
+    if (!can_seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
+
+    if (!mem_recr->seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
+
+    return mem_attn->seq_rm(seq_id, p0, p1);
 }
 
 bool llama_memory_hybrid::seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) {

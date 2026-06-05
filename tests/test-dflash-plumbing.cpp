@@ -81,6 +81,7 @@ int main(int argc, char ** argv) {
     const std::string kv_cache_cpp = read_file(root + "/src/llama-kv-cache.cpp");
     const std::string kv_cache_kvarn_cpp = read_file(root + "/src/llama-kv-cache-kvarn.cpp");
     const std::string kv_cache_iswa_cpp = read_file(root + "/src/llama-kv-cache-iswa.cpp");
+    const std::string kv_cache_dsa_cpp = read_file(root + "/src/llama-kv-cache-dsa.cpp");
     const std::string llama_kvarn_h = read_file(root + "/src/llama-kvarn.h");
     const std::string dflash_profile_h = read_file(root + "/src/dflash-profile.h");
     const std::string cparams_h = read_file(root + "/src/llama-cparams.h");
@@ -2172,6 +2173,43 @@ int main(int argc, char ** argv) {
                  context_cpp.find("llama_memory_can_shift(mem)") != std::string::npos &&
                  context_cpp.find("cannot add/divide sequence positions because the memory implementation does not support shifting") != std::string::npos,
         "public sequence position mutation wrappers must fail fast when memory cannot shift");
+    ok &= expect(llama_h.find("llama_memory_can_seq_rm") != std::string::npos &&
+                 memory_h.find("virtual bool can_seq_rm") != std::string::npos &&
+                 context_cpp.find("return mem->can_seq_rm(seq_id, p0, p1);") != std::string::npos,
+        "public memory API must expose a side-effect-free seq_rm capability check");
+    ok &= expect(kv_cache_kvarn_cpp.find("bool llama_kv_cache_kvarn::can_seq_rm") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("return can_remove(seq_id, p0, p1);") != std::string::npos,
+        "KVarN must report range-specific seq_rm capability without mutating cache metadata");
+    ok &= expect(kv_cache_iswa_cpp.find("bool llama_kv_cache_iswa::can_seq_rm") != std::string::npos &&
+                 kv_cache_iswa_cpp.find("kv_base->can_seq_rm(seq_id, p0, p1)") != std::string::npos &&
+                 kv_cache_iswa_cpp.find("if (!can_seq_rm(seq_id, p0, p1))") != std::string::npos,
+        "ISWA seq_rm must check both child caches before mutating either child");
+    ok &= expect(kv_cache_dsa_cpp.find("bool llama_kv_cache_dsa::can_seq_rm") != std::string::npos &&
+                 kv_cache_dsa_cpp.find("kv_mla->can_seq_rm(seq_id, p0, p1)") != std::string::npos &&
+                 kv_cache_dsa_cpp.find("if (!can_seq_rm(seq_id, p0, p1))") != std::string::npos,
+        "DSA seq_rm must check both child caches before mutating either child");
+    ok &= expect(kv_cache_iswa_cpp.find("res = res & kv_base->seq_rm_cell") == std::string::npos &&
+                 kv_cache_iswa_cpp.find("if (!kv_base->seq_rm_cell(seq_id, cell_idx))") != std::string::npos &&
+                 kv_cache_dsa_cpp.find("res = res & kv_mla->seq_rm_cell") == std::string::npos &&
+                 kv_cache_dsa_cpp.find("if (!kv_mla->seq_rm_cell(seq_id, cell_idx))") != std::string::npos,
+        "composite seq_rm_cell must short-circuit so a failed first child does not mutate later children");
+    ok &= expect(memory_hybrid.find("bool llama_memory_hybrid::can_seq_rm") != std::string::npos &&
+                 memory_hybrid.find("mem_recr->can_seq_rm(seq_id, p0, p1)") != std::string::npos &&
+                 memory_hybrid.find("if (!can_seq_rm(seq_id, p0, p1))") != std::string::npos &&
+                 memory_hybrid_iswa.find("bool llama_memory_hybrid_iswa::can_seq_rm") != std::string::npos &&
+                 memory_hybrid_iswa.find("mem_attn->can_seq_rm(seq_id, p0, p1)") != std::string::npos,
+        "hybrid seq_rm must check recurrent and attention children before mutating either child");
+    ok &= expect(memory_recurrent_cpp.find("bool llama_memory_recurrent::can_seq_rm") != std::string::npos &&
+                 memory_recurrent_cpp.find("rollback <= (llama_pos) n_rs_seq") != std::string::npos,
+        "recurrent memory must expose the same bounded rollback capability used by seq_rm");
+    ok &= expect(server_context.find("const llama_pos checkpoint_trim_p0") != std::string::npos &&
+                 server_context.find("llama_memory_can_seq_rm(llama_get_memory(ctx_tgt), slot.id, checkpoint_trim_p0, -1)") != std::string::npos &&
+                 server_context.find("skipping context checkpoint") != std::string::npos,
+        "server prompt-cache restore must skip checkpoints whose final trim is unsupported by the target memory");
+    ok &= expect(server_context.find("const llama_pos prompt_trim_p0 = slot.prompt.tokens.pos_next(n_past);") != std::string::npos &&
+                 server_context.find("memory cannot trim cached suffix") != std::string::npos &&
+                 server_context.find("slot.prompt.checkpoints.clear();") != std::string::npos,
+        "server prompt-cache reuse must fall back to full prefill when the final cached-suffix trim is unsupported");
     ok &= expect(kv_cache_kvarn_cpp.find("GGML_ABORT(\"KVarN does not support position shifts\")") != std::string::npos &&
                  kv_cache_kvarn_cpp.find("GGML_ABORT(\"KVarN does not support position division\")") != std::string::npos,
         "KVarN seq_add/seq_div must fail fast instead of logging and continuing");

@@ -101,22 +101,29 @@ void llama_kv_cache_iswa::clear(bool data) {
     kv_swa ->clear(data);
 }
 
+bool llama_kv_cache_iswa::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    return kv_base->can_seq_rm(seq_id, p0, p1) &&
+           kv_swa ->can_seq_rm(seq_id, p0, p1);
+}
+
 bool llama_kv_cache_iswa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    bool res = true;
+    if (!can_seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
 
-    res = res & kv_base->seq_rm(seq_id, p0, p1);
-    res = res & kv_swa ->seq_rm(seq_id, p0, p1);
+    if (!kv_base->seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
 
-    return res;
+    return kv_swa->seq_rm(seq_id, p0, p1);
 }
 
 bool llama_kv_cache_iswa::seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) {
-    bool res = true;
+    if (!kv_base->seq_rm_cell(seq_id, cell_idx)) {
+        return false;
+    }
 
-    res = res & kv_base->seq_rm_cell(seq_id, cell_idx);
-    res = res & kv_swa ->seq_rm_cell(seq_id, cell_idx);
-
-    return res;
+    return kv_swa->seq_rm_cell(seq_id, cell_idx);
 }
 
 int llama_kv_cache_iswa::cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) {

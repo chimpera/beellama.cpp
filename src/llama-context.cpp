@@ -9282,6 +9282,18 @@ bool llama_memory_seq_rm(
     return mem->seq_rm(seq_id, p0, p1);
 }
 
+bool llama_memory_can_seq_rm(
+        llama_memory_t mem,
+          llama_seq_id seq_id,
+             llama_pos p0,
+             llama_pos p1) {
+    if (!mem) {
+        return true;
+    }
+
+    return mem->can_seq_rm(seq_id, p0, p1);
+}
+
 bool llama_memory_seq_rm_cell(
         llama_memory_t mem,
           llama_seq_id seq_id,

@@ -5426,9 +5426,31 @@ private:
                                             // the full sequence length, so the SWA-based pos_min check always fails.
                                             // use pos_max <= pos_next instead to find the most recent valid checkpoint.
                                             if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
-                                                return cur.pos_max <= pos_next;
+                                                if (cur.pos_max > pos_next) {
+                                                    return false;
+                                                }
+                                            } else if (!(cur.pos_min < pos_min_thold || cur.pos_min == 0)) {
+                                                return false;
                                             }
-                                            return cur.pos_min < pos_min_thold || cur.pos_min == 0;
+
+                                            const llama_pos checkpoint_pos_next = std::min(pos_next, std::max(cur.pos_min + 1, cur.pos_max));
+                                            const int64_t checkpoint_n_past =
+                                                (int64_t) std::min(slot.prompt.tokens.size_up_to_pos(checkpoint_pos_next), (size_t) cur.n_tokens);
+                                            const llama_pos checkpoint_trim_p0 = slot.prompt.tokens.pos_next(checkpoint_n_past);
+
+                                            if (!llama_memory_can_seq_rm(llama_get_memory(ctx_tgt), slot.id, checkpoint_trim_p0, -1)) {
+                                                LOG_INF("slot %12.*s: id %2d | task %d | skipping context checkpoint [%d, %d]: target memory cannot trim from %d\n", 12,
+                                                    func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, checkpoint_trim_p0);
+                                                return false;
+                                            }
+
+                                            if (ctx_dft && !llama_memory_can_seq_rm(llama_get_memory(ctx_dft.get()), slot.id, checkpoint_trim_p0, -1)) {
+                                                LOG_INF("slot %12.*s: id %2d | task %d | skipping context checkpoint [%d, %d]: draft memory cannot trim from %d\n", 12,
+                                                    func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, checkpoint_trim_p0);
+                                                return false;
+                                            }
+
+                                            return true;
                                         }
                                     );
 
@@ -5484,6 +5506,23 @@ private:
                             SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n", n_past, slot.task->n_tokens());
                             n_past--;
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
+                        }
+
+                        {
+                            const llama_pos prompt_trim_p0 = slot.prompt.tokens.pos_next(n_past);
+                            const bool can_trim_tgt =
+                                llama_memory_can_seq_rm(llama_get_memory(ctx_tgt), slot.id, prompt_trim_p0, -1);
+                            const bool can_trim_dft =
+                                ctx_dft == nullptr ||
+                                llama_memory_can_seq_rm(llama_get_memory(ctx_dft.get()), slot.id, prompt_trim_p0, -1);
+
+                            if (!can_trim_tgt || !can_trim_dft) {
+                                SLT_WRN(slot,
+                                        "forcing full prompt re-processing because memory cannot trim cached suffix from %d (target = %d, draft = %d)\n",
+                                        prompt_trim_p0, can_trim_tgt ? 1 : 0, can_trim_dft ? 1 : 0);
+                                n_past = 0;
+                                slot.prompt.checkpoints.clear();
+                            }
                         }
 
                         slot.n_prompt_tokens_cache = n_past;

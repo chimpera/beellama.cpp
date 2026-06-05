@@ -780,6 +780,14 @@ extern "C" {
                  llama_pos p0,
                  llama_pos p1);
 
+    // Check if llama_memory_seq_rm() can remove this range from the current memory state
+    // without mutating the memory.
+    LLAMA_API bool llama_memory_can_seq_rm(
+            llama_memory_t mem,
+              llama_seq_id seq_id,
+                 llama_pos p0,
+                 llama_pos p1);
+
     // Remove seq_id from a specific cell by index (not position range).
     // Used for selective tree-branch KV cleanup without affecting main-path cells
     // at the same position. Returns true if the cell becomes empty.
