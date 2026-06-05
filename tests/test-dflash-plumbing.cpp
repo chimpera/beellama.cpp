@@ -79,7 +79,9 @@ int main(int argc, char ** argv) {
     const std::string context_cpp = read_file(root + "/src/llama-context.cpp");
     const std::string kv_cache_h = read_file(root + "/src/llama-kv-cache.h");
     const std::string kv_cache_cpp = read_file(root + "/src/llama-kv-cache.cpp");
+    const std::string kv_cache_kvarn_cpp = read_file(root + "/src/llama-kv-cache-kvarn.cpp");
     const std::string kv_cache_iswa_cpp = read_file(root + "/src/llama-kv-cache-iswa.cpp");
+    const std::string llama_kvarn_h = read_file(root + "/src/llama-kvarn.h");
     const std::string dflash_profile_h = read_file(root + "/src/dflash-profile.h");
     const std::string cparams_h = read_file(root + "/src/llama-cparams.h");
     const std::string graph_cpp = read_file(root + "/src/llama-graph.cpp");
@@ -130,6 +132,7 @@ int main(int argc, char ** argv) {
     const std::string model_cpp = read_file(root + "/src/llama-model.cpp");
     const std::string cuda_ring = read_file(root + "/ggml/src/ggml-cuda/cross-ring-interleave.cu");
     const std::string cuda_cpp = read_file(root + "/ggml/src/ggml-cuda/ggml-cuda.cu");
+    const std::string ggml_cuda_kvarn = read_file(root + "/ggml/src/ggml-cuda/kvarn.cu");
     const std::string cuda_argmax = read_file(root + "/ggml/src/ggml-cuda/argmax.cu");
     const std::string cuda_gdn = read_file(root + "/ggml/src/ggml-cuda/gated_delta_net.cu");
     const std::string cuda_reg = read_file(root + "/ggml/src/ggml-cuda/ggml-cuda.cu");
@@ -1228,7 +1231,8 @@ int main(int argc, char ** argv) {
         "single-slot speculative accept must propagate accept(0), which MTP uses to advance pending target hidden state after rejection");
     ok &= expect(server_context.find("shrunk recurrent state to %d cells before draft load") != std::string::npos, "server must shrink recurrent backup cells before draft model load");
     ok &= expect(server_context.find("expanded recurrent state to %d cells before speculative GPU buffers") != std::string::npos, "server must expand recurrent backup cells before DFlash slot/GPU buffer init");
-    ok &= expect(server_context.find("const bool needs_backup_sequences") != std::string::npos &&
+    ok &= expect(server_context.find("bool speculative_needs_recurrent_backup_sequences() const") != std::string::npos &&
+                 server_context.find("params_base.speculative.type() != COMMON_SPECULATIVE_TYPE_DFLASH") != std::string::npos &&
                  server_context.find("ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_RS && params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH") != std::string::npos,
         "server must use Bee backup rollback only for DFlash on non-RS contexts; MTP uses checkpoint-based accept path");
     ok &= expect(common_h.find("return needs_rs_seq ? draft.n_max : 0u;") != std::string::npos,
@@ -2151,9 +2155,55 @@ int main(int argc, char ** argv) {
     ok &= expect(server_cpp.find("params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED") != std::string::npos &&
                  server_cpp.find("n_parallel is set to auto with KVarN; KVarN requires non-unified KV") != std::string::npos,
         "server auto n_parallel must use non-unified streams for multi-sequence KVarN");
+    ok &= expect(server_context.find("server_probe_model_arch") != std::string::npos &&
+                 server_context.find("gguf_find_key(ctx_gguf, \"general.architecture\")") != std::string::npos &&
+                 server_context.find("params_base.speculative.type() != COMMON_SPECULATIVE_TYPE_DFLASH") != std::string::npos &&
+                 server_context.find("server_arch_name_is_recurrent_or_hybrid") != std::string::npos &&
+                 server_context.find("\"qwen35\"") != std::string::npos &&
+                 server_context.find("\"gemma4\"") == std::string::npos &&
+                 server_context.find("does not need recurrent backup streams") != std::string::npos,
+        "DFlash recurrent backup stream allocation must be gated by probed recurrent/hybrid target architecture");
+    ok &= expect(server_context.find("DFlash target requires recurrent rollback, but recurrent backup streams were not reserved") != std::string::npos,
+        "DFlash startup must fail closed if a recurrent/hybrid target was loaded without backup stream reservation");
     ok &= expect(server_context.find("params_base.kvarn.type == LLAMA_KVARN_TYPE_DISABLED") != std::string::npos &&
                  server_context.find("KVarN requires non-unified KV; keeping separate KV streams for speculative backup") != std::string::npos,
         "DFlash recurrent backup auto-unification must not override KVarN non-unified streams");
+    ok &= expect(context_cpp.find("llama_memory_seq_add") != std::string::npos &&
+                 context_cpp.find("llama_memory_can_shift(mem)") != std::string::npos &&
+                 context_cpp.find("cannot add/divide sequence positions because the memory implementation does not support shifting") != std::string::npos,
+        "public sequence position mutation wrappers must fail fast when memory cannot shift");
+    ok &= expect(kv_cache_kvarn_cpp.find("GGML_ABORT(\"KVarN does not support position shifts\")") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("GGML_ABORT(\"KVarN does not support position division\")") != std::string::npos,
+        "KVarN seq_add/seq_div must fail fast instead of logging and continuing");
+    ok &= expect(kv_cache_kvarn_cpp.find("constexpr uint32_t KVAR_N_STATE_VERSION = 2") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("saved_streams") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("metadata->get_stream_for_seq(seq_id)") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("layer.k_records_stream[stream]") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("layer.v_stage_stream[stream]") != std::string::npos,
+        "KVarN sequence state must serialize stream-scoped tensors instead of whole-cache tensors");
+    ok &= expect(kv_cache_kvarn_cpp.find("pending_stream_copies") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("llama_synchronize(lctx)") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("copy_kvarn_stream") != std::string::npos,
+        "KVarN cross-stream seq_cp must be queued and copied during synchronized update");
+    ok &= expect(kv_cache_kvarn_cpp.find("std::strstr(name, \"CUDA\")") != std::string::npos &&
+                 kv_cache_kvarn_cpp.find("std::strstr(name, \"ROCm\")") == std::string::npos &&
+                 kv_cache_kvarn_cpp.find("std::strstr(name, \"HIP\")") == std::string::npos &&
+                 kv_cache_kvarn_cpp.find("std::strstr(name, \"MUSA\")") == std::string::npos,
+        "KVarN must fail closed on unverified GPU backends instead of accepting broad backend-name matches");
+    ok &= expect(llama_kvarn_h.find("LLAMA_API") == std::string::npos,
+        "internal C++ KVarN helper declarations must not be exported from the public DLL ABI");
+    ok &= expect(kv_cache_iswa_cpp.find("KVarN enabled for non-SWA layers; SWA layers use compact normal KV cache") != std::string::npos &&
+                 kv_cache_iswa_cpp.find("make_cache(size_base, 0, LLAMA_SWA_TYPE_NONE, filter_base, use_kvarn)") != std::string::npos &&
+                 kv_cache_iswa_cpp.find("make_cache(size_swa, hparams.n_swa, hparams.swa_type, filter_swa, false)") != std::string::npos &&
+                 kv_cache_iswa_cpp.find("KVarN requires full-size SWA cache for now") == std::string::npos,
+        "ISWA with KVarN must keep SWA layers on compact normal KV instead of expanding SWA to full-size KVarN");
+    ok &= expect(context_cpp.find("params.kvarn.type != LLAMA_KVARN_K4V2_G128") != std::string::npos &&
+                 context_cpp.find("is experimental; only kvarn_k4v2_g128 is reference-aligned") != std::string::npos,
+        "non-k4v2 KVarN presets must be labeled experimental at runtime");
+    ok &= expect(ggml_cuda_kvarn.find("kvarn_live_groups_kernel") != std::string::npos &&
+                 ggml_cuda_kvarn.find("ggml_cuda_pool_alloc<int> live_groups") != std::string::npos &&
+                 ggml_cuda_kvarn.find("live_groups[out_stream]") != std::string::npos,
+        "CUDA KVarN materialization must precompute live groups once per stream instead of scanning indices inside every output block");
 
     return ok ? 0 : 1;
 }

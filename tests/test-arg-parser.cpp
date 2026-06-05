@@ -114,6 +114,14 @@ int main(void) {
     argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn4", "--cache-type-v", "kvarn2", "--kv-kvarn-sink-tokens", "256"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
+    params = common_params();
+    argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn4", "--grp-attn-n", "2"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMPLETION));
+
+    params = common_params();
+    argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn4", "--kv-kvarn-pool-mem-frac", "0.15"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
     // removed legacy speculative aliases
     argv = {"binary_name", "--draft", "123"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
@@ -173,7 +181,6 @@ int main(void) {
         "--cache-type-v", "kvarn2",
         "--kv-kvarn-sink-tokens", "128",
         "--kv-kvarn-sinkhorn-iters", "12",
-        "--kv-kvarn-pool-mem-frac", "0.15",
         "--kv-kvarn-fallback",
     };
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
@@ -182,7 +189,6 @@ int main(void) {
     assert(params.kvarn.value_bits == 2);
     assert(params.kvarn.sink_tokens == 128);
     assert(params.kvarn.sinkhorn_iters == 12);
-    assert(params.kvarn.pool_mem_frac == 0.15f);
     assert(!params.kvarn.fail_if_unsupported);
     assert(params.cache_kvarn_bits_k == 4);
     assert(params.cache_kvarn_bits_v == 2);
@@ -196,8 +202,8 @@ int main(void) {
     argv = {"binary_name", "-m", "model_file.gguf", "--kv-unified", "--cache-type-k", "kvarn4"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
     assert(params.kvarn.type == LLAMA_KVARN_K4V4_G128);
-    assert(!params.kv_unified);
-    assert(!common_context_params_to_llama(params).kv_unified);
+    assert(params.kv_unified);
+    assert(common_context_params_to_llama(params).kv_unified);
 
     params = common_params();
     argv = {"binary_name", "-m", "model_file.gguf", "--cache-type-k", "kvarn3"};
