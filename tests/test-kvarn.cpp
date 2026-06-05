@@ -147,6 +147,15 @@ static void test_runtime_validation() {
             "unified multi-sequence runtime accepted");
 }
 
+static void test_remove_policy() {
+    require(llama_kvarn_can_remove_range(-1, 0, -1, 128), "empty sequence removal rejected");
+    require(llama_kvarn_can_remove_range(783, -1, -1, 128), "full sequence removal with negative range rejected");
+    require(llama_kvarn_can_remove_range(783, 0, -1, 128), "full sequence removal from zero rejected");
+    require(llama_kvarn_can_remove_range(783, 0, 784, 128), "explicit full sequence range removal rejected");
+    require(!llama_kvarn_can_remove_range(783, 0, 640, 128), "old compressed partial removal accepted");
+    require(llama_kvarn_can_remove_range(783, 640, -1, 128), "current/previous tail removal rejected");
+}
+
 static void test_pack_roundtrip(int bits) {
     const int n = 257;
     std::vector<uint8_t> values(n);
@@ -455,6 +464,7 @@ int main() {
     test_tile_layout();
     test_head_dimension_slicing();
     test_runtime_validation();
+    test_remove_policy();
     test_pack_roundtrip(2);
     test_pack_roundtrip(3);
     test_pack_roundtrip(4);

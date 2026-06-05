@@ -53,6 +53,8 @@ const char * llama_kvarn_validate_runtime(
         const llama_kvarn_params & params,
         const llama_kvarn_runtime_requirements & requirements);
 
+bool llama_kvarn_can_remove_range(llama_pos pos_max, llama_pos p0, llama_pos p1, uint32_t group);
+
 void llama_kvarn_hadamard_128(float * values);
 
 void llama_kvarn_quantize_k_tile(

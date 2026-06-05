@@ -132,6 +132,29 @@ const char * llama_kvarn_validate_runtime(
     return nullptr;
 }
 
+bool llama_kvarn_can_remove_range(llama_pos pos_max, llama_pos p0, llama_pos p1, uint32_t group) {
+    assert(group > 0);
+
+    if (pos_max < 0) {
+        return true;
+    }
+
+    const llama_pos begin = std::max<llama_pos>(p0, 0);
+    const llama_pos end = p1 < 0 ? std::numeric_limits<llama_pos>::max() : p1;
+
+    if (begin == 0 && end > pos_max) {
+        return true;
+    }
+
+    if (end <= pos_max) {
+        return false;
+    }
+
+    const llama_pos live_group = pos_max / group;
+    const llama_pos earliest_exact = std::max<llama_pos>(0, live_group - 1) * group;
+    return begin >= earliest_exact;
+}
+
 llama_kvarn_tile_layout llama_kvarn_make_layout(int head_dim, int group, int key_bits, int value_bits) {
     assert(head_dim > 0);
     assert(group > 0);

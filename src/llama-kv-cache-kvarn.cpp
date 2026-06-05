@@ -502,27 +502,12 @@ void llama_kv_cache_kvarn::clear(bool data) {
 }
 
 bool llama_kv_cache_kvarn::can_remove(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
-    if (p0 < 0 && p1 < 0) {
-        return true;
-    }
     if (seq_id < 0) {
-        return false;
+        return p0 <= 0 && p1 < 0;
     }
 
     const llama_pos pos_max = metadata->seq_pos_max(seq_id);
-    if (pos_max < 0) {
-        return true;
-    }
-
-    const llama_pos begin = std::max<llama_pos>(p0, 0);
-    const llama_pos end = p1 < 0 ? std::numeric_limits<llama_pos>::max() : p1;
-    if (end <= pos_max) {
-        return false;
-    }
-
-    const llama_pos live_group = pos_max / KVAR_N_GROUP;
-    const llama_pos earliest_exact = std::max<llama_pos>(0, live_group - 1) * KVAR_N_GROUP;
-    return begin >= earliest_exact;
+    return llama_kvarn_can_remove_range(pos_max, p0, p1, KVAR_N_GROUP);
 }
 
 bool llama_kv_cache_kvarn::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
