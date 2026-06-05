@@ -1,0 +1,63 @@
+name: Save rolling ccache
+description: Delete the previous exact ccache key and save the refreshed cache under the same key.
+inputs:
+  key:
+    description: Exact GitHub cache key to replace.
+    required: true
+  ref:
+    description: Git ref that owns the cache, for example refs/heads/main.
+    required: true
+  path:
+    description: ccache directory to save.
+    required: false
+    default: .ccache
+runs:
+  using: composite
+  steps:
+    - name: Delete previous cache
+      uses: actions/github-script@v7
+      env:
+        CACHE_KEY: ${{ inputs.key }}
+        CACHE_REF: ${{ inputs.ref }}
+      with:
+        script: |
+          const key = process.env.CACHE_KEY;
+          const ref = process.env.CACHE_REF;
+          const { owner, repo } = context.repo;
+          let deleted = 0;
+
+          for (let page = 1; ; page += 1) {
+            const { data } = await github.rest.actions.getActionsCacheList({
+              owner,
+              repo,
+              ref,
+              key,
+              per_page: 100,
+              page,
+            });
+            const caches = data.actions_caches ?? [];
+            for (const cache of caches) {
+              if (cache.key !== key) {
+                continue;
+              }
+              await github.rest.actions.deleteActionsCacheById({
+                owner,
+                repo,
+                cache_id: cache.id,
+              });
+              deleted += 1;
+            }
+            if (caches.length < 100) {
+              break;
+            }
+          }
+
+          core.info(deleted === 0
+            ? `No previous cache found for ${key} on ${ref}.`
+            : `Deleted ${deleted} previous cache entr${deleted === 1 ? "y" : "ies"} for ${key} on ${ref}.`);
+
+    - name: Save refreshed cache
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}

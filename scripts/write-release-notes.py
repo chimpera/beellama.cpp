@@ -7,8 +7,8 @@ def asset(release_url: str, tag: str, filename: str, label: str) -> str:
     return f"- [{label}]({release_url}/beellama-{tag}-{filename})"
 
 
-def docker_line(image_repo: str, tag: str, label: str, suffix: str) -> str:
-    return f"- {label}: `docker pull {image_repo}:server{suffix}-{tag}`"
+def docker_line(package_url: str, image_repo: str, tag: str, label: str, suffix: str) -> str:
+    return f"- [{label}]({package_url}) - `docker pull {image_repo}:server{suffix}-{tag}`"
 
 
 def main() -> None:
@@ -47,6 +47,7 @@ def main() -> None:
         "",
         "**Windows:**",
         asset(release_url, tag, "bin-win-cpu-x64.zip", "Windows x64 CPU"),
+        asset(release_url, tag, "bin-win-vulkan-x64.zip", "Windows x64 Vulkan"),
         asset(release_url, tag, "bin-win-sycl-x64.zip", "Windows x64 SYCL"),
         (
             asset(release_url, tag, "bin-win-cuda-12.4-x64.zip", "Windows x64 CUDA 12.4")
@@ -59,15 +60,13 @@ def main() -> None:
         asset(release_url, tag, "bin-win-hip-radeon-x64.zip", "Windows x64 HIP"),
         "",
         "**Docker:**",
-        docker_line(args.image_repo, tag, "CPU", "-cpu"),
-        docker_line(args.image_repo, tag, "CUDA", "-cuda"),
-        docker_line(args.image_repo, tag, "CUDA 12", "-cuda12"),
-        docker_line(args.image_repo, tag, "CUDA 13", "-cuda13"),
-        docker_line(args.image_repo, tag, "ROCm", "-rocm"),
-        docker_line(args.image_repo, tag, "Vulkan", "-vulkan"),
-        docker_line(args.image_repo, tag, "SYCL", "-sycl"),
-        "",
-        f"[Browse all container images]({args.package_url})",
+        docker_line(args.package_url, args.image_repo, tag, "CPU", "-cpu"),
+        docker_line(args.package_url, args.image_repo, tag, "CUDA", "-cuda"),
+        docker_line(args.package_url, args.image_repo, tag, "CUDA 12", "-cuda12"),
+        docker_line(args.package_url, args.image_repo, tag, "CUDA 13", "-cuda13"),
+        docker_line(args.package_url, args.image_repo, tag, "ROCm", "-rocm"),
+        docker_line(args.package_url, args.image_repo, tag, "Vulkan", "-vulkan"),
+        docker_line(args.package_url, args.image_repo, tag, "SYCL", "-sycl"),
         "",
     ]
 

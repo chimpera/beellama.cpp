@@ -317,12 +317,13 @@ Current release binaries are on the [releases page](https://github.com/Anbeeld/b
 | Ubuntu x64 | ROCm 7.2 | `bin-ubuntu-rocm-7.2-x64.tar.gz` |
 | Ubuntu x64 | SYCL | `bin-ubuntu-sycl-x64.tar.gz` |
 | Windows x64 | CPU | `bin-win-cpu-x64.zip` |
+| Windows x64 | Vulkan | `bin-win-vulkan-x64.zip` |
 | Windows x64 | SYCL | `bin-win-sycl-x64.zip` |
 | Windows x64 | CUDA 12.4 | `bin-win-cuda-12.4-x64.zip` |
 | Windows x64 | CUDA 13.1 | `bin-win-cuda-13.1-x64.zip` |
 | Windows x64 | HIP/Radeon | `bin-win-hip-radeon-x64.zip` |
 
-Windows CUDA archives contain a `ggml-cuda.dll` backend; download the matching `cudart-win-cuda-*-x64.zip` runtime archive and extract it into the same folder. Windows SYCL and HIP archives ship as standalone packages with all required runtime DLLs bundled.
+Windows CUDA archives contain a `ggml-cuda.dll` backend; download the matching `cudart-win-cuda-*-x64.zip` runtime archive and extract it into the same folder. Windows Vulkan requires a Vulkan-capable GPU driver/runtime on the target machine. Windows SYCL and HIP archives ship as standalone packages with their required runtime DLLs bundled, except for GPU driver runtimes.
 
 Docker images are published to `ghcr.io/anbeeld/beellama.cpp`:
 
