@@ -115,6 +115,7 @@ int main(int argc, char ** argv) {
     const std::string arg_cpp = read_file(root + "/common/arg.cpp");
     const std::string common_h = read_file(root + "/common/common.h");
     const std::string common_cpp = read_file(root + "/common/common.cpp");
+    const std::string llama_bench = read_file(root + "/tools/llama-bench/llama-bench.cpp");
     const std::string dflash_draft = read_file(root + "/src/models/dflash_draft.cpp");
     const std::string delta_net_base = read_file(root + "/src/models/delta-net-base.cpp");
     const std::string arch_cpp = read_file(root + "/src/llama-arch.cpp");
@@ -406,7 +407,7 @@ int main(int argc, char ** argv) {
                  ggml_cpu_c.find("[GGML_TYPE_Q6_0]") != std::string::npos,
         "CPU backend traits must support q6_0 quantize and dot-product paths");
     ok &= expect(arg_cpp.find("GGML_TYPE_Q6_0") != std::string::npos &&
-                 read_file(root + "/tools/llama-bench/llama-bench.cpp").find("GGML_TYPE_Q6_0") != std::string::npos,
+                 llama_bench.find("GGML_TYPE_Q6_0") != std::string::npos,
         "CLI and benchmark cache-type parsers must expose q6_0");
     ok &= expect(cuda_common.find("ggml_cuda_type_traits<GGML_TYPE_Q6_0>") != std::string::npos &&
                  cuda_dequantize.find("dequantize_q6_0") != std::string::npos &&
@@ -2238,6 +2239,13 @@ int main(int argc, char ** argv) {
     ok &= expect(context_cpp.find("params.kvarn.type != LLAMA_KVARN_K4V2_G128") != std::string::npos &&
                  context_cpp.find("is experimental; only kvarn_k4v2_g128 is reference-aligned") != std::string::npos,
         "non-k4v2 KVarN presets must be labeled experimental at runtime");
+    ok &= expect(llama_bench.find("bench_cache_type_from_name") != std::string::npos &&
+                 llama_bench.find("kvarn_bits_from_cache_type") != std::string::npos &&
+                 llama_bench.find("normalize_kvarn_cache_pair") != std::string::npos &&
+                 llama_bench.find("cache_type_list_has_kvarn(params.type_k)") != std::string::npos &&
+                 llama_bench.find("cparams.kvarn") != std::string::npos &&
+                 llama_bench.find("bench_cache_type_name(type_k)") != std::string::npos,
+        "llama-bench must accept cache-type KVarN pseudo names and pass KVarN params to llama_context_params");
     ok &= expect(ggml_cuda_kvarn.find("kvarn_live_groups_kernel") != std::string::npos &&
                  ggml_cuda_kvarn.find("ggml_cuda_pool_alloc<int> live_groups") != std::string::npos &&
                  ggml_cuda_kvarn.find("live_groups[out_stream]") != std::string::npos,
