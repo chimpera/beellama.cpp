@@ -23,8 +23,9 @@ PRS=()
 PRS+=("$@")
 
 echo "=== Fetching upstream ==="
-# Discard any locally-applied GCC patch so rebase has a clean tree (re-applied below).
+# Discard any locally-applied patches so rebase has a clean tree (re-applied below).
 git checkout -- ggml/src/ggml-cpu/ops.cpp 2>/dev/null || true
+git checkout -- ggml/src/ggml-common.h 2>/dev/null || true
 # Fetch first so the remote-tracking ref exists for the checkout. An upstream
 # release TAG of the same name would otherwise win resolution and detach HEAD;
 # create the local branch explicitly instead of relying on checkout's DWIM.
@@ -88,6 +89,21 @@ else
     sed -i '/#include <cmath>/a #include <cstring>' "$OPS"
     echo "  patched $OPS (+ #include <cstring>)"
 fi
+
+echo ""
+echo "=== Applying stored local patches (idempotent) ==="
+# patches/*.patch hold local fixes for dev-branch breakage (e.g. the v0.4.8
+# _MSC_VER guard around the PQ2_0/PTQ1_0 typedefs in ggml-common.h). A patch
+# that no longer applies is skipped — if upstream already fixed it, the build
+# will prove it.
+for p in patches/*.patch; do
+    if git apply --check "$p" 2>/dev/null; then
+        git apply "$p"
+        echo "  applied $p"
+    else
+        echo "  skipped (already applied or not applicable): $p"
+    fi
+done
 
 echo ""
 echo "=== Configuring with CUDA ==="
