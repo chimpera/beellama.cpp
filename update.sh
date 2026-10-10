@@ -24,8 +24,11 @@ PRS+=("$@")
 
 echo "=== Fetching upstream ==="
 # Discard any locally-applied patches so rebase has a clean tree (re-applied below).
+# Each stored patch lists the files it touches; revert exactly those.
 git checkout -- ggml/src/ggml-cpu/ops.cpp 2>/dev/null || true
-git checkout -- ggml/src/ggml-common.h 2>/dev/null || true
+for p in patches/*.patch; do
+    git checkout -- $(git apply --numstat "$p" | awk '{print $3}') 2>/dev/null || true
+done
 # Fetch first so the remote-tracking ref exists for the checkout. An upstream
 # release TAG of the same name would otherwise win resolution and detach HEAD;
 # create the local branch explicitly instead of relying on checkout's DWIM.
