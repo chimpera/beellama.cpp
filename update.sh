@@ -28,7 +28,10 @@ git checkout -- ggml/src/ggml-cpu/ops.cpp 2>/dev/null || true
 # Fetch first so the remote-tracking ref exists for the checkout. An upstream
 # release TAG of the same name would otherwise win resolution and detach HEAD;
 # create the local branch explicitly instead of relying on checkout's DWIM.
-git fetch upstream --tags
+# Upstream has re-tagged some old preview tags, and "would clobber existing tag"
+# rejections make git fetch exit 1 even though branch refs update fine. The
+# show-ref checks below verify the branch ref actually arrived.
+git fetch upstream --tags || true
 if git show-ref --verify --quiet "refs/remotes/upstream/${UPSTREAM_BRANCH}"; then
     UPSTREAM_REF="upstream/${UPSTREAM_BRANCH}"
 elif git show-ref --verify --quiet "refs/tags/${UPSTREAM_BRANCH}"; then
