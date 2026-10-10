@@ -1,0 +1,19 @@
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index 7819eeaef..b42a07ad9 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -446,6 +446,14 @@ namespace GGUFMeta {
+     template bool llama_model_loader::get_key<uint32_t>   (enum llm_kv kid, uint32_t & result,    bool required);
+     template bool llama_model_loader::get_key<std::string>(enum llm_kv kid, std::string & result, bool required);
+ 
++    // Local patch: the v0.4.8 dev branch moved the string-key template definitions out of the
++    // header into this file. The kid-wrapper forwarding calls get inlined here, so GCC emits no
++    // out-of-line string-key symbols — but llama-model.cpp calls these overloads directly,
++    // leaving undefined references at link time. Instantiate them explicitly.
++    template bool llama_model_loader::get_key<bool>(const std::string & key, bool & result, bool required);
++    template bool llama_model_loader::get_arr<int>(const std::string & key, std::vector<int> & result, bool required);
++    template bool llama_model_loader::get_arr<std::string>(const std::string & key, std::vector<std::string> & result, bool required);
++
+     template<>
+     bool llama_model_loader::get_key(enum llm_kv kid, enum llama_pooling_type & result, bool required) {
+         uint32_t tmp;
