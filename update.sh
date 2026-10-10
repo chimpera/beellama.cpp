@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Update beellama4.cpp (BeeLlama v0.4.7): pull from upstream, optionally
+# Update beellama4.cpp (BeeLlama v0.4.8): pull from upstream, optionally
 # cherry-pick PRs, apply the GCC-15 patch, configure, build llama-server only.
 # Usage: ./update.sh [PR_NUMBER ...]
 #   CLI args are appended to the PRS list below
 #
-# This folder is the dedicated v0.4.7 source tree (backend tag: bee4).
-# The sibling engines/beellama.cpp holds v0.3.2 (backend tag: bee).
+# This folder is the dedicated v0.4.8 source tree (backend tag: bee4).
+# The 3.x tree (engines/beellama.cpp) was retired 2026-10-01 to /home/guy/serve/archive/.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Upstream branch to track. Not every release has a remote BRANCH (v0.4.7 is
-# tag-only; v0.4.8 is the dev branch) — resolve to the remote branch when it
-# exists, else the release tag.
-UPSTREAM_BRANCH="v0.4.7"
+# Upstream branch to track. v0.4.8 is the dev branch (ggml 0.26.0, llama.cpp
+# master sync through 9adc7f420); the latest release TAG is v0.4.7. Bump this
+# when a newer dev branch or release tag appears.
+UPSTREAM_BRANCH="v0.4.8"
 
 # PRs to cherry-pick on every build. Edit this list as needed.
 PRS=()
